@@ -1,0 +1,23 @@
+## Interface: 120000, 120001
+## Title: Storm's Dungeon Data
+## Notes: Real-time Mythic+ dungeon performance tracking with damage, healing, and interrupt analytics
+## Notes-enUS: Track your group's performance metrics throughout Mythic+ dungeons
+## Author: Storm
+## Version: 1.1.8
+## SavedVariables: StormsDungeonDataDB
+## OptionalDeps: Details
+
+## X-Curse-Project-ID: 0
+## X-Wago-ID: 0
+
+Core.lua
+Utils.lua
+Database.lua
+Events.lua
+DamageMeterCompat.lua
+CombatLog.lua
+TestMode.lua
+UI/ScoreboardFrame.lua
+UI/HistoryViewer.lua
+UI/UIUtils.lua
+Main.lua
