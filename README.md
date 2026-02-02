@@ -14,7 +14,6 @@ A World of Warcraft addon that tracks and displays detailed statistics for Mythi
     - Total healing done
     - Number of interrupts
     - Deaths
-    - Points gained
 
 ### Comprehensive Statistics Tracking
 The addon tracks and stores:

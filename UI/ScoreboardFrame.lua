@@ -56,10 +56,12 @@ function Scoreboard:Create()
     title:SetPoint("TOPLEFT", frame.TitleBg, "TOPLEFT", 10, -5)
     title:SetText("Run Complete")
     frame.Title = title
-    
-    -- Close button
-    local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-    closeBtn:SetPoint("TOPRIGHT", frame.TitleBg, "TOPRIGHT", -5, -5)
+
+    -- Close button: BasicFrameTemplateWithInset already provides one; only create if missing.
+    if not frame.CloseButton and not frame.closeButton then
+        local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+        closeBtn:SetPoint("TOPRIGHT", frame.TitleBg, "TOPRIGHT", -5, -5)
+    end
     
     -- Dungeon info section - improved layout
     local dungeonInfoBg = CreateFrame("Frame", nil, frame)
@@ -99,8 +101,8 @@ function Scoreboard:Create()
     
     -- Player stats table header
     local headerY = -155
-    local headers = {"Player", "Damage", "Healing", "Interrupts", "Deaths", "Points"}
-    local columnWidths = {180, 140, 140, 120, 100, 100}
+    local headers = {"Player", "Damage", "Healing", "Interrupts", "Deaths"}
+    local columnWidths = {180, 170, 170, 140, 120}
     local headerX = 15
     
     -- Create header background
@@ -157,12 +159,12 @@ function Scoreboard:Create()
         local damage = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         damage:SetPoint("LEFT", row, "LEFT", columnWidths[1], 0)
         damage:SetWidth(columnWidths[2])
-        damage:SetJustifyH("LEFT")
+        damage:SetJustifyH("CENTER")
         
         local healing = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         healing:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2], 0)
         healing:SetWidth(columnWidths[3])
-        healing:SetJustifyH("LEFT")
+        healing:SetJustifyH("CENTER")
         
         local interrupts = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         interrupts:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3], 0)
@@ -175,11 +177,6 @@ function Scoreboard:Create()
         deaths:SetJustifyH("CENTER")
         deaths:SetTextColor(0.8, 0.8, 0.8)  -- Grayed out
         
-        local points = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        points:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3] + columnWidths[4] + columnWidths[5], 0)
-        points:SetWidth(columnWidths[6])
-        points:SetJustifyH("CENTER")
-        
         table.insert(frame.PlayerRows, {
             frame = row,
             mvpBg = mvpBg,
@@ -188,7 +185,6 @@ function Scoreboard:Create()
             healing = healing,
             interrupts = interrupts,
             deaths = deaths,
-            points = points,
         })
     end
 
@@ -321,13 +317,54 @@ function Scoreboard:Show(runRecord)
     local mvpStats = nil
     local mvpPlayer = nil
 
+    local function SafeShare(value, total)
+        value = tonumber(value) or 0
+        total = tonumber(total) or 0
+        if total <= 0 then
+            return 0
+        end
+        return value / total
+    end
+
+    local function GroupDeathBonus(teamDeaths)
+        -- 1.0 when 0 deaths, 0.5 when 1 death, etc.
+        teamDeaths = tonumber(teamDeaths) or 0
+        if teamDeaths < 0 then teamDeaths = 0 end
+        return 1 / (1 + teamDeaths)
+    end
+
+    local function MVPScoreFor(role, dmgShare, healShare, intShare, deaths, teamDeaths)
+        role = role or ""
+        deaths = tonumber(deaths) or 0
+
+        local groupBonus = GroupDeathBonus(teamDeaths)
+
+        -- Scores are designed to be comparable across roles.
+        if role == "HEALER" then
+            return (0.20 * dmgShare) + (1.00 * healShare) + (0.10 * intShare) + (1.00 * groupBonus) - (0.35 * deaths)
+        elseif role == "TANK" then
+            return (0.70 * dmgShare) + (0.30 * healShare) + (0.80 * intShare) + (0.60 * groupBonus) - (0.35 * deaths)
+        else -- DAMAGER / unknown
+            return (1.00 * dmgShare) + (0.10 * healShare) + (0.60 * intShare) + (0.15 * groupBonus) - (0.35 * deaths)
+        end
+    end
+
+    local mvpCandidates = {}
+
     for i, player in ipairs(playerData) do
         if i <= 5 then
             local row = frame.PlayerRows[i]
             if not row then break end
             
             -- Get stats from either format
-            local stats = player.stats or (MPT.CombatLog and MPT.CombatLog:GetPlayerStats(player.name)) or {}
+            -- Prefer runRecord player fields (what we save), then test-mode nested stats, then live CombatLog lookup.
+            local stats = player.stats or {}
+            if stats.damage == nil and (player.damage ~= nil or player.healing ~= nil or player.interrupts ~= nil) then
+                stats = player
+            end
+            if (stats.damage == nil) and MPT.CombatLog and MPT.CombatLog.GetPlayerStats and player.name then
+                stats = MPT.CombatLog:GetPlayerStats(player.name) or {}
+            end
 
             -- Color player name by class (use text color directly for reliability)
             row.name:SetText(player.name or "")
@@ -354,36 +391,52 @@ function Scoreboard:Show(runRecord)
             local interruptsText = tostring(interruptsValue)
 
             if damageValue > 0 and damageValue >= personalBest.damage then
-                damageText = damageText .. " |cffffd100PB|r"
+                damageText = "|cffff8000" .. damageText .. "|r"
             end
             if healingValue > 0 and healingValue >= personalBest.healing then
-                healingText = healingText .. " |cffffd100PB|r"
+                healingText = "|cffff8000" .. healingText .. "|r"
             end
             if interruptsValue > 0 and interruptsValue >= personalBest.interrupts then
-                interruptsText = interruptsText .. " |cffffd100PB|r"
+                interruptsText = "|cffff8000" .. interruptsText .. "|r"
             end
 
             row.damage:SetText(damageText)
             row.healing:SetText(healingText)
             row.interrupts:SetText(interruptsText)
-            row.deaths:SetText(tostring(stats.deaths or 0))
-            row.points:SetText("0")  -- TODO: Calculate points
+            local deathsValue = stats.deaths or 0
+
+            row.deaths:SetText(tostring(deathsValue))
 
             totalsDamage = totalsDamage + (stats.damage or 0)
             totalsHealing = totalsHealing + (stats.healing or 0)
             totalsInterrupts = totalsInterrupts + (stats.interrupts or 0)
-            totalsDeaths = totalsDeaths + (stats.deaths or 0)
+            totalsDeaths = totalsDeaths + deathsValue
 
-            -- MVP heuristic: balanced contribution (damage + healing + interrupts weight) minus deaths
-            local score = (stats.damage or 0) + (stats.healing or 0) + ((stats.interrupts or 0) * 25000) - ((stats.deaths or 0) * 100000)
+            mvpCandidates[i] = {
+                player = player,
+                stats = stats,
+                role = player.role or stats.role,
+                deaths = deathsValue,
+            }
+            
+            row.frame:Show()
+        end
+    end
+
+    -- Compute MVP using final totals for proper normalization.
+    for i = 1, 5 do
+        local c = mvpCandidates[i]
+        if c and c.stats then
+            local dmgShare = SafeShare(c.stats.damage or 0, totalsDamage)
+            local healShare = SafeShare(c.stats.healing or 0, totalsHealing)
+            local intShare = SafeShare(c.stats.interrupts or 0, totalsInterrupts)
+            local score = MVPScoreFor(c.role, dmgShare, healShare, intShare, c.deaths, totalsDeaths)
             if (not mvpScore) or score > mvpScore then
                 mvpScore = score
                 mvpIndex = i
-                mvpStats = stats
-                mvpPlayer = player
+                mvpStats = c.stats
+                mvpPlayer = c.player
             end
-            
-            row.frame:Show()
         end
     end
 

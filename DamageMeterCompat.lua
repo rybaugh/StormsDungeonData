@@ -27,6 +27,36 @@ DamageMeterCompat.RestrictionState = {
 
 DamageMeterCompat.CurrentRestrictions = 0x0
 
+function DamageMeterCompat:EnsureSessionID()
+    if not self.IsWoW12Plus then
+        return false
+    end
+
+    if self.CurrentSessionID then
+        return true
+    end
+
+    local sessions = self:GetAvailableSessions()
+    if not sessions or #sessions == 0 then
+        return false
+    end
+
+    -- Sessions are typically numeric IDs; pick the latest
+    local allNumeric = true
+    for _, v in ipairs(sessions) do
+        if type(v) ~= "number" then
+            allNumeric = false
+            break
+        end
+    end
+    if allNumeric then
+        table.sort(sessions)
+    end
+
+    self.CurrentSessionID = sessions[#sessions]
+    return self.CurrentSessionID ~= nil
+end
+
 function DamageMeterCompat:Initialize()
     print("|cff00ffaa[StormsDungeonData]|r Damage Meter Compat initialized")
     print("|cff00ffaa[StormsDungeonData]|r Using " .. (self.IsWoW12Plus and "C_DamageMeter API (WoW 12.0+)" or "COMBAT_LOG_EVENT_UNFILTERED"))
@@ -128,7 +158,11 @@ end
 
 function DamageMeterCompat:GetDamageData()
     -- Get damage data from C_DamageMeter API
-    if not self.IsWoW12Plus or not self.CurrentSessionID then
+    if not self.IsWoW12Plus then
+        return nil
+    end
+
+    if not self:EnsureSessionID() then
         return nil
     end
     
@@ -164,7 +198,11 @@ end
 
 function DamageMeterCompat:GetHealingData()
     -- Get healing data from C_DamageMeter API
-    if not self.IsWoW12Plus or not self.CurrentSessionID then
+    if not self.IsWoW12Plus then
+        return nil
+    end
+
+    if not self:EnsureSessionID() then
         return nil
     end
     
@@ -199,7 +237,11 @@ end
 
 function DamageMeterCompat:GetInterruptData()
     -- Get interrupt data from C_DamageMeter API
-    if not self.IsWoW12Plus or not self.CurrentSessionID then
+    if not self.IsWoW12Plus then
+        return nil
+    end
+
+    if not self:EnsureSessionID() then
         return nil
     end
     

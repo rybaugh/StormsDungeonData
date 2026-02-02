@@ -442,27 +442,6 @@ function HistoryViewer:UpdateDisplay()
         end)
     end
 
-    -- Determine current personal-best run per dungeon (highest keystone level).
-    -- If multiple runs share the best level, pick the most recent one.
-    local pbLevelByDungeon = {}
-    local pbTimestampByDungeon = {}
-    for _, run in ipairs(allRuns) do
-        local dungeonKey = run.dungeonName or tostring(run.dungeonId or run.dungeonID or run.dungeon or "--")
-        local level = run.keystoneLevel or run.dungeonLevel or 0
-        local ts = run.timestamp or 0
-        local bestLevel = pbLevelByDungeon[dungeonKey]
-
-        if bestLevel == nil or level > bestLevel then
-            pbLevelByDungeon[dungeonKey] = level
-            pbTimestampByDungeon[dungeonKey] = ts
-        elseif level == bestLevel then
-            local bestTs = pbTimestampByDungeon[dungeonKey] or 0
-            if ts > bestTs then
-                pbTimestampByDungeon[dungeonKey] = ts
-            end
-        end
-    end
-
     local runs = allRuns
     
     -- Filter by keystone level if selected
@@ -499,6 +478,17 @@ function HistoryViewer:UpdateDisplay()
         return bestDamage, bestHealing, bestInterrupts
     end
 
+    -- Determine personal-best run stats per dungeon for the current view.
+    -- We highlight only the specific stat numbers (DMG/HPS/INT), not the whole row.
+    local pbDamageByDungeon, pbHealingByDungeon, pbInterruptsByDungeon = {}, {}, {}
+    for _, run in ipairs(runs) do
+        local dungeonKey = run.dungeonName or tostring(run.dungeonId or run.dungeonID or run.dungeon or "--")
+        local bestDamage, bestHealing, bestInterrupts = GetRunBestStats(run)
+        pbDamageByDungeon[dungeonKey] = math.max(pbDamageByDungeon[dungeonKey] or 0, bestDamage or 0)
+        pbHealingByDungeon[dungeonKey] = math.max(pbHealingByDungeon[dungeonKey] or 0, bestHealing or 0)
+        pbInterruptsByDungeon[dungeonKey] = math.max(pbInterruptsByDungeon[dungeonKey] or 0, bestInterrupts or 0)
+    end
+
     local runY = 0
     for idx, run in ipairs(runs) do
         local runRow = CreateFrame("Frame", nil, self.frame.RunContent)
@@ -518,14 +508,7 @@ function HistoryViewer:UpdateDisplay()
         local mobPct = run.overallMobPercentage or 0
         local bestDamage, bestHealing, bestInterrupts = GetRunBestStats(run)
 
-        local dungeonKey = run.dungeonName or tostring(run.dungeonId or run.dungeonID or run.dungeon or "--")
-        local isPersonalBest = (level > 0)
-            and (level == (pbLevelByDungeon[dungeonKey] or -1))
-            and ((run.timestamp or 0) == (pbTimestampByDungeon[dungeonKey] or -1))
-
-        if isPersonalBest then
-            bg:SetColorTexture(1, 0.84, 0, 0.18)
-        elseif idx % 2 == 0 then
+        if idx % 2 == 0 then
             bg:SetColorTexture(0.1, 0.1, 0.1, 0.18)
         else
             bg:SetColorTexture(0, 0, 0, 0)
@@ -579,21 +562,34 @@ function HistoryViewer:UpdateDisplay()
         dmgText:SetPoint("LEFT", runRow, "LEFT", x, 0)
         dmgText:SetWidth(95)
         dmgText:SetJustifyH("RIGHT")
-        dmgText:SetText(MPT.Utils:FormatNumber(bestDamage))
+        local dungeonKey = run.dungeonName or tostring(run.dungeonId or run.dungeonID or run.dungeon or "--")
+        local dmgValueText = MPT.Utils:FormatNumber(bestDamage)
+        if (bestDamage or 0) > 0 and (bestDamage or 0) >= (pbDamageByDungeon[dungeonKey] or 0) then
+            dmgValueText = "|cffff8000" .. dmgValueText .. "|r"
+        end
+        dmgText:SetText(dmgValueText)
         x = x + 95
 
         local healText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         healText:SetPoint("LEFT", runRow, "LEFT", x, 0)
         healText:SetWidth(95)
         healText:SetJustifyH("RIGHT")
-        healText:SetText(MPT.Utils:FormatNumber(bestHealing))
+        local healValueText = MPT.Utils:FormatNumber(bestHealing)
+        if (bestHealing or 0) > 0 and (bestHealing or 0) >= (pbHealingByDungeon[dungeonKey] or 0) then
+            healValueText = "|cffff8000" .. healValueText .. "|r"
+        end
+        healText:SetText(healValueText)
         x = x + 95
 
         local intText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         intText:SetPoint("LEFT", runRow, "LEFT", x, 0)
         intText:SetWidth(90)
         intText:SetJustifyH("CENTER")
-        intText:SetText(tostring(bestInterrupts))
+        local intValueText = tostring(bestInterrupts)
+        if (bestInterrupts or 0) > 0 and (bestInterrupts or 0) >= (pbInterruptsByDungeon[dungeonKey] or 0) then
+            intValueText = "|cffff8000" .. intValueText .. "|r"
+        end
+        intText:SetText(intValueText)
 
         table.insert(self.frame.RunRows, runRow)
         runY = runY + 24
