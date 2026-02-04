@@ -14,8 +14,8 @@ Edit the console or access the SavedVariables directly to modify:
 -- Auto-show scoreboard (default: true)
 StormsDungeonDataDB.settings.autoShowScoreboard = false
 
--- Maximum runs to keep per dungeon (default: 50)
-StormsDungeonDataDB.settings.maxHistoryPerDungeon = 100
+-- Run history retention
+-- All runs are kept per season (no max cap)
 
 -- Enable debug logging (for developers)
 StormsDungeonDataDB.settings.debugMode = false

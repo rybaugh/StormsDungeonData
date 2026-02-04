@@ -9,18 +9,17 @@ MPT.VERSION = "1.1.8"
 MPT.NAME = "Storm's Dungeon Data"
 
 -- Core modules
-MPT.Database = {}
-MPT.Utils = {}
-MPT.Events = {}
-MPT.DamageMeterCompat = {}
-MPT.CombatLog = {}
-MPT.UI = {}
+MPT.Database = MPT.Database or {}
+MPT.Utils = MPT.Utils or {}
+MPT.Events = MPT.Events or {}
+MPT.DamageMeterCompat = MPT.DamageMeterCompat or {}
+MPT.CombatLog = MPT.CombatLog or {}
+MPT.UI = MPT.UI or {}
 
 -- Settings
 MPT.Settings = {
     autoShowScoreboard = true,
     trackAllStats = true,
-    maxHistoryPerDungeon = 50,
 }
 
 -- Initialize addon

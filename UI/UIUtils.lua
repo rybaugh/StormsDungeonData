@@ -97,4 +97,172 @@ function UIUtils:GetRoleIcon(role)
     return icons[role] or ""
 end
 
+-- Create minimap button with drag support
+function UIUtils:CreateMinimapButton(name, icon, onclick)
+    if _G["StormsDungeonDataMinimapButton"] then
+        return _G["StormsDungeonDataMinimapButton"]
+    end
+    if not Minimap then
+        return nil
+    end
+
+    -- Prefer LibDBIcon (SexyMap friendly) if available
+    if LibStub then
+        local ldb = LibStub("LibDataBroker-1.1", true)
+        local dbIcon = LibStub("LibDBIcon-1.0", true)
+        if ldb and dbIcon then
+            if not StormsDungeonDataDB then
+                StormsDungeonDataDB = {}
+            end
+            if not StormsDungeonDataDB.settings then
+                StormsDungeonDataDB.settings = {}
+            end
+            if not StormsDungeonDataDB.settings.libdbicon then
+                StormsDungeonDataDB.settings.libdbicon = { hide = false, minimapPos = 225 }
+            end
+
+            if not self._ldbLauncher then
+                self._ldbLauncher = ldb:NewDataObject("StormsDungeonData", {
+                    type = "launcher",
+                    text = "StormsDungeonData",
+                    icon = icon or "Interface/Icons/Inv_misc_rune_10",
+                    OnClick = function(_, button)
+                        if onclick then
+                            onclick(_, button)
+                        end
+                    end,
+                    OnTooltipShow = function(tooltip)
+                        if not tooltip then return end
+                        tooltip:AddLine("StormsDungeonData")
+                        tooltip:AddLine("Left-click: Open history", 0.2, 1, 0.2)
+                        tooltip:AddLine("Right-click: Save pending run", 0.2, 1, 0.2)
+                    end,
+                })
+            else
+                self._ldbLauncher.icon = icon or self._ldbLauncher.icon
+            end
+
+            if not dbIcon:IsRegistered("StormsDungeonData") then
+                dbIcon:Register("StormsDungeonData", self._ldbLauncher, StormsDungeonDataDB.settings.libdbicon)
+            end
+
+            if StormsDungeonDataDB.settings.libdbicon.hide then
+                dbIcon:Hide("StormsDungeonData")
+            else
+                dbIcon:Show("StormsDungeonData")
+            end
+
+            return dbIcon:GetMinimapButton("StormsDungeonData")
+        end
+    end
+
+    local containerName = name .. "Container"
+    local container = _G[containerName]
+    if not container then
+        container = CreateFrame("Frame", containerName, UIParent)
+        container:SetSize(8, 8)
+        container:SetPoint("CENTER", Minimap, "CENTER", 0, 0)
+        container:SetFrameStrata("LOW")
+        if Minimap.HookScript then
+            Minimap:HookScript("OnHide", function() container:Hide() end)
+            Minimap:HookScript("OnShow", function() container:Show() end)
+        end
+    else
+        container:ClearAllPoints()
+        container:SetPoint("CENTER", Minimap, "CENTER", 0, 0)
+    end
+
+    local existing = _G[name]
+    local btn = existing or CreateFrame("Button", name, container)
+    btn:SetSize(32, 32)
+    btn:SetFrameStrata("HIGH")
+    btn:SetFrameLevel(8)
+    btn:SetHighestButtonLevel()
+    
+    -- Background
+    btn:SetNormalTexture(icon or "Interface/Icons/Inv_misc_rune_10")
+    btn:SetPushedTexture(icon or "Interface/Icons/Inv_misc_rune_10", 0.6, 0.6)
+    btn:SetHighlightTexture("Interface/Minimap/UI-Minimap-ZoomButton-Highlight")
+    
+    -- Tooltip
+    btn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetText("Run History", 1, 1, 1)
+        GameTooltip:AddLine("Left-click: Open history", 0.2, 1, 0.2)
+        GameTooltip:AddLine("Right-click: Save pending run", 0.2, 1, 0.2)
+        GameTooltip:AddLine("Drag to reposition", 0.6, 0.8, 1)
+        GameTooltip:Show()
+    end)
+    
+    btn:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    
+    -- Click handler
+    if onclick then
+        btn:SetScript("OnClick", onclick)
+    end
+    
+    btn:SetClampedToScreen(true)
+
+    local minimapRadius = 72
+
+    local function PositionOnMinimap(angle)
+        local x = math.cos(angle) * minimapRadius
+        local y = math.sin(angle) * minimapRadius
+        btn:ClearAllPoints()
+        btn:SetPoint("CENTER", Minimap, "CENTER", x, y)
+    end
+
+    local function GetAngleFromCursor()
+        local mx, my = Minimap:GetCenter()
+        if not mx or not my then
+            return math.rad(225)
+        end
+        local scale = Minimap:GetEffectiveScale() or 1
+        local cx, cy = GetCursorPosition()
+        cx, cy = cx / scale, cy / scale
+        return math.atan2(cy - my, cx - mx)
+    end
+
+    -- Dragging (locked to minimap ring)
+    btn:SetMovable(true)
+    btn:RegisterForDrag("LeftButton")
+    btn:SetScript("OnDragStart", function(self)
+        self.isDragging = true
+        self:SetScript("OnUpdate", function()
+            PositionOnMinimap(GetAngleFromCursor())
+        end)
+    end)
+    btn:SetScript("OnDragStop", function(self)
+        self.isDragging = false
+        self:SetScript("OnUpdate", nil)
+
+        local angle = GetAngleFromCursor()
+
+        if not StormsDungeonDataDB then
+            StormsDungeonDataDB = {}
+        end
+        if not StormsDungeonDataDB.settings then
+            StormsDungeonDataDB.settings = {}
+        end
+        if not StormsDungeonDataDB.settings.minimap then
+            StormsDungeonDataDB.settings.minimap = {}
+        end
+        StormsDungeonDataDB.settings.minimap.angle = angle
+
+        PositionOnMinimap(angle)
+    end)
+
+    -- Position button on minimap (default or saved)
+    local angle = math.rad(225)
+    if StormsDungeonDataDB and StormsDungeonDataDB.settings and StormsDungeonDataDB.settings.minimap and StormsDungeonDataDB.settings.minimap.angle then
+        angle = StormsDungeonDataDB.settings.minimap.angle
+    end
+    PositionOnMinimap(angle)
+    
+    btn:Show()
+    return btn
+end
+
 print("|cff00ffaa[StormsDungeonData]|r UI Utils module loaded")

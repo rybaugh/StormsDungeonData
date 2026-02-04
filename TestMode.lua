@@ -6,6 +6,135 @@ local MPT = StormsDungeonData
 local TestMode = {}
 MPT.TestMode = TestMode
 
+local function SafeCall(func, ...)
+    if type(func) ~= "function" then
+        return nil
+    end
+    local ok, a, b, c, d = pcall(func, ...)
+    if not ok then
+        return nil
+    end
+    return a, b, c, d
+end
+
+local function GetPlayerSpecInfoSafe()
+    if type(GetSpecialization) ~= "function" or type(GetSpecializationInfo) ~= "function" then
+        return nil
+    end
+
+    local specIndex = GetSpecialization()
+    if not specIndex then
+        return nil
+    end
+
+    local specID, specName, _, specIcon, role, classToken = GetSpecializationInfo(specIndex)
+    if not specID then
+        return nil
+    end
+
+    return {
+        specID = specID,
+        specName = specName,
+        specIcon = specIcon,
+        specRole = role,
+        specClass = classToken,
+    }
+end
+
+local function GetHeroTalentInfoSafe()
+    if not C_ClassTalents or not C_Traits then
+        return nil
+    end
+
+    local function GetSubTreeInfoSafe(configID, subTreeID)
+        if type(C_Traits.GetSubTreeInfo) ~= "function" then
+            return nil
+        end
+        local info = SafeCall(C_Traits.GetSubTreeInfo, configID, subTreeID)
+        if not info and subTreeID then
+            info = SafeCall(C_Traits.GetSubTreeInfo, subTreeID)
+        end
+        return info
+    end
+
+    local function GetTreeInfoSafe(configID, treeID)
+        if type(C_Traits.GetTreeInfo) ~= "function" then
+            return nil
+        end
+        local info = SafeCall(C_Traits.GetTreeInfo, configID, treeID)
+        if not info and treeID then
+            info = SafeCall(C_Traits.GetTreeInfo, treeID)
+        end
+        return info
+    end
+
+    local configID = SafeCall(C_ClassTalents.GetActiveConfigID)
+    if not configID and type(C_Traits.GetActiveConfigID) == "function" then
+        configID = SafeCall(C_Traits.GetActiveConfigID)
+    end
+
+    local heroSpecID = SafeCall(C_ClassTalents.GetActiveHeroTalentSpec)
+    if heroSpecID and type(C_ClassTalents.GetHeroTalentSpecInfo) == "function" then
+        local heroInfo = SafeCall(C_ClassTalents.GetHeroTalentSpecInfo, heroSpecID)
+        if type(heroInfo) == "table" then
+            local heroTreeID = heroInfo.subTreeID or heroInfo.heroTreeID or heroSpecID
+            local heroName = heroInfo.name or heroInfo.specName
+            local heroIcon = heroInfo.icon or heroInfo.iconFileID or heroInfo.iconID
+            if heroTreeID or heroName or heroIcon then
+                return {
+                    heroTreeID = heroTreeID,
+                    heroName = heroName,
+                    heroIcon = heroIcon,
+                }
+            end
+        end
+    end
+
+    local subTreeID = heroSpecID
+    if not subTreeID then
+        subTreeID = SafeCall(C_ClassTalents.GetActiveHeroTalentTreeID)
+    end
+
+    if (not subTreeID or subTreeID == 0) and configID and type(C_ClassTalents.GetHeroTalentSpecsForClassSpec) == "function" then
+        local specIndex = type(GetSpecialization) == "function" and GetSpecialization() or nil
+        local specID = specIndex and type(GetSpecializationInfo) == "function" and select(1, GetSpecializationInfo(specIndex)) or nil
+        if specID then
+            local subTreeIDs = SafeCall(C_ClassTalents.GetHeroTalentSpecsForClassSpec, configID, specID)
+            if type(subTreeIDs) == "table" then
+                for _, id in ipairs(subTreeIDs) do
+                    local info = GetSubTreeInfoSafe(configID, id)
+                    if info and info.isActive then
+                        subTreeID = id
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if configID and subTreeID then
+        local subTreeInfo = GetSubTreeInfoSafe(configID, subTreeID)
+        if type(subTreeInfo) == "table" then
+            return {
+                heroTreeID = subTreeID,
+                heroName = subTreeInfo.name,
+                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID,
+            }
+        end
+
+        local treeInfo = GetTreeInfoSafe(configID, subTreeID)
+        if type(treeInfo) == "table" then
+            return {
+                heroTreeID = subTreeID,
+                heroName = treeInfo.name,
+                heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID,
+            }
+        end
+    end
+
+    return subTreeID and { heroTreeID = subTreeID } or nil
+end
+
 -- Test data presets - realistic player stats
 TestMode.TestPresets = {
     DungeonPresets = {
@@ -72,17 +201,40 @@ local function ConvertPlayerStatsToPlayersArray(playerStats)
         { role = "DAMAGER", class = "HUNTER" },
     }
 
+    local names = {}
+    for name in pairs(playerStats) do
+        table.insert(names, name)
+    end
+    table.sort(names)
+
     local i = 1
-    for name, stats in pairs(playerStats) do
+    for _, name in ipairs(names) do
+        local stats = playerStats[name] or {}
         local roleInfo = roleOrder[i] or roleOrder[#roleOrder]
+        local role = roleInfo.role
         local classToken = roleInfo.class
+
+        local lowerName = tostring(name):lower()
+        if lowerName:find("tank") then
+            role = "TANK"
+            classToken = "WARRIOR"
+        elseif lowerName:find("heal") then
+            role = "HEALER"
+            classToken = "PRIEST"
+        elseif lowerName:find("dps") then
+            role = "DAMAGER"
+        else
+            role = "DAMAGER"
+        end
+
         if playerName and playerClass and name == playerName then
             classToken = playerClass
         end
+
         table.insert(players, {
             name = name,
             class = classToken,
-            role = roleInfo.role,
+            role = role,
             damage = stats.damage or 0,
             healing = stats.healing or 0,
             interrupts = stats.interrupts or 0,
@@ -132,6 +284,23 @@ function TestMode:SeedHistory(count)
             duration,
             players
         )
+
+        do
+            local spec = GetPlayerSpecInfoSafe()
+            if spec then
+                runRecord.specID = spec.specID
+                runRecord.specName = spec.specName
+                runRecord.specIcon = spec.specIcon
+                runRecord.specRole = spec.specRole
+            end
+
+            local hero = GetHeroTalentInfoSafe()
+            if hero then
+                runRecord.heroTreeID = hero.heroTreeID
+                runRecord.heroName = hero.heroName
+                runRecord.heroIcon = hero.heroIcon
+            end
+        end
 
         local offset = math.random(600, 7 * 24 * 60 * 60) -- within last week
         runRecord.timestamp = time() - offset
@@ -234,6 +403,23 @@ function TestMode:SimulateDungeonRun()
         duration,
         players
     )
+
+    do
+        local spec = GetPlayerSpecInfoSafe()
+        if spec then
+            runRecord.specID = spec.specID
+            runRecord.specName = spec.specName
+            runRecord.specIcon = spec.specIcon
+            runRecord.specRole = spec.specRole
+        end
+
+        local hero = GetHeroTalentInfoSafe()
+        if hero then
+            runRecord.heroTreeID = hero.heroTreeID
+            runRecord.heroName = hero.heroName
+            runRecord.heroIcon = hero.heroIcon
+        end
+    end
     runRecord.dungeonLevel = dungeonData.level
     runRecord.actualTime = actualTime
     runRecord.timeLimit = timeLimit

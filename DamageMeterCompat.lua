@@ -27,33 +27,60 @@ DamageMeterCompat.RestrictionState = {
 
 DamageMeterCompat.CurrentRestrictions = 0x0
 
+local function NormalizeSessionID(value)
+    if type(value) == "number" then
+        return value
+    end
+    if type(value) == "string" then
+        local n = tonumber(value)
+        if n then
+            return n
+        end
+    end
+    if type(value) == "table" then
+        local n = value.sessionID or value.sessionId or value.id or value.ID
+        if type(n) == "number" then
+            return n
+        end
+        if type(n) == "string" then
+            n = tonumber(n)
+            if n then
+                return n
+            end
+        end
+    end
+    return nil
+end
+
 function DamageMeterCompat:EnsureSessionID()
     if not self.IsWoW12Plus then
         return false
     end
 
+    self.CurrentSessionID = NormalizeSessionID(self.CurrentSessionID)
     if self.CurrentSessionID then
         return true
     end
 
     local sessions = self:GetAvailableSessions()
-    if not sessions or #sessions == 0 then
+    if not sessions then
         return false
     end
 
-    -- Sessions are typically numeric IDs; pick the latest
-    local allNumeric = true
-    for _, v in ipairs(sessions) do
-        if type(v) ~= "number" then
-            allNumeric = false
-            break
+    local numericSessions = {}
+    for _, v in pairs(sessions) do
+        local id = NormalizeSessionID(v)
+        if id then
+            table.insert(numericSessions, id)
         end
     end
-    if allNumeric then
-        table.sort(sessions)
+
+    if #numericSessions == 0 then
+        return false
     end
 
-    self.CurrentSessionID = sessions[#sessions]
+    table.sort(numericSessions)
+    self.CurrentSessionID = numericSessions[#numericSessions]
     return self.CurrentSessionID ~= nil
 end
 
@@ -84,7 +111,10 @@ end
 function DamageMeterCompat:OnDamageMeterEvent(event, ...)
     if event == "COMBAT_METRICS_SESSION_NEW" then
         -- New combat session started
-        local sessionID = ...
+        local sessionID = NormalizeSessionID(...)
+        if not sessionID then
+            return
+        end
         self.CurrentSessionID = sessionID
         self.SessionData[sessionID] = {
             startTime = GetTime(),
@@ -96,12 +126,15 @@ function DamageMeterCompat:OnDamageMeterEvent(event, ...)
         
     elseif event == "COMBAT_METRICS_SESSION_UPDATED" then
         -- Combat session data updated
-        local sessionID = ...
+        local sessionID = NormalizeSessionID(...)
         -- Data is available via C_DamageMeter API
         
     elseif event == "COMBAT_METRICS_SESSION_END" then
         -- Combat session ended
-        local sessionID = ...
+        local sessionID = NormalizeSessionID(...)
+        if not sessionID then
+            return
+        end
         if self.SessionData[sessionID] then
             self.SessionData[sessionID].endTime = GetTime()
         end
@@ -165,6 +198,9 @@ function DamageMeterCompat:GetDamageData()
     if not self:EnsureSessionID() then
         return nil
     end
+    if type(self.CurrentSessionID) ~= "number" then
+        return nil
+    end
     
     local damageData = {}
     
@@ -205,6 +241,9 @@ function DamageMeterCompat:GetHealingData()
     if not self:EnsureSessionID() then
         return nil
     end
+    if type(self.CurrentSessionID) ~= "number" then
+        return nil
+    end
     
     local healingData = {}
     
@@ -242,6 +281,9 @@ function DamageMeterCompat:GetInterruptData()
     end
 
     if not self:EnsureSessionID() then
+        return nil
+    end
+    if type(self.CurrentSessionID) ~= "number" then
         return nil
     end
     

@@ -5,6 +5,135 @@ local MPT = StormsDungeonData
 local Scoreboard = {}
 MPT.Scoreboard = Scoreboard
 
+local function SafeCall(func, ...)
+    if type(func) ~= "function" then
+        return nil
+    end
+    local ok, a, b, c, d = pcall(func, ...)
+    if not ok then
+        return nil
+    end
+    return a, b, c, d
+end
+
+local function GetPlayerSpecInfoSafe()
+    if type(GetSpecialization) ~= "function" or type(GetSpecializationInfo) ~= "function" then
+        return nil
+    end
+
+    local specIndex = GetSpecialization()
+    if not specIndex then
+        return nil
+    end
+
+    local specID, specName, _, specIcon, role, classToken = GetSpecializationInfo(specIndex)
+    if not specID then
+        return nil
+    end
+
+    return {
+        specID = specID,
+        specName = specName,
+        specIcon = specIcon,
+        specRole = role,
+        specClass = classToken,
+    }
+end
+
+local function GetHeroTalentInfoSafe()
+    if not C_ClassTalents or not C_Traits then
+        return nil
+    end
+
+    local function GetSubTreeInfoSafe(configID, subTreeID)
+        if type(C_Traits.GetSubTreeInfo) ~= "function" then
+            return nil
+        end
+        local info = SafeCall(C_Traits.GetSubTreeInfo, configID, subTreeID)
+        if not info and subTreeID then
+            info = SafeCall(C_Traits.GetSubTreeInfo, subTreeID)
+        end
+        return info
+    end
+
+    local function GetTreeInfoSafe(configID, treeID)
+        if type(C_Traits.GetTreeInfo) ~= "function" then
+            return nil
+        end
+        local info = SafeCall(C_Traits.GetTreeInfo, configID, treeID)
+        if not info and treeID then
+            info = SafeCall(C_Traits.GetTreeInfo, treeID)
+        end
+        return info
+    end
+
+    local configID = SafeCall(C_ClassTalents.GetActiveConfigID)
+    if not configID and type(C_Traits.GetActiveConfigID) == "function" then
+        configID = SafeCall(C_Traits.GetActiveConfigID)
+    end
+
+    local heroSpecID = SafeCall(C_ClassTalents.GetActiveHeroTalentSpec)
+    if heroSpecID and type(C_ClassTalents.GetHeroTalentSpecInfo) == "function" then
+        local heroInfo = SafeCall(C_ClassTalents.GetHeroTalentSpecInfo, heroSpecID)
+        if type(heroInfo) == "table" then
+            local heroTreeID = heroInfo.subTreeID or heroInfo.heroTreeID or heroSpecID
+            local heroName = heroInfo.name or heroInfo.specName
+            local heroIcon = heroInfo.icon or heroInfo.iconFileID or heroInfo.iconID
+            if heroTreeID or heroName or heroIcon then
+                return {
+                    heroTreeID = heroTreeID,
+                    heroName = heroName,
+                    heroIcon = heroIcon,
+                }
+            end
+        end
+    end
+
+    local subTreeID = heroSpecID
+    if not subTreeID then
+        subTreeID = SafeCall(C_ClassTalents.GetActiveHeroTalentTreeID)
+    end
+
+    if (not subTreeID or subTreeID == 0) and configID and type(C_ClassTalents.GetHeroTalentSpecsForClassSpec) == "function" then
+        local specIndex = type(GetSpecialization) == "function" and GetSpecialization() or nil
+        local specID = specIndex and type(GetSpecializationInfo) == "function" and select(1, GetSpecializationInfo(specIndex)) or nil
+        if specID then
+            local subTreeIDs = SafeCall(C_ClassTalents.GetHeroTalentSpecsForClassSpec, configID, specID)
+            if type(subTreeIDs) == "table" then
+                for _, id in ipairs(subTreeIDs) do
+                    local info = GetSubTreeInfoSafe(configID, id)
+                    if info and info.isActive then
+                        subTreeID = id
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if configID and subTreeID then
+        local subTreeInfo = GetSubTreeInfoSafe(configID, subTreeID)
+        if type(subTreeInfo) == "table" then
+            return {
+                heroTreeID = subTreeID,
+                heroName = subTreeInfo.name,
+                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID,
+            }
+        end
+
+        local treeInfo = GetTreeInfoSafe(configID, subTreeID)
+        if type(treeInfo) == "table" then
+            return {
+                heroTreeID = subTreeID,
+                heroName = treeInfo.name,
+                heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID,
+            }
+        end
+    end
+
+    return subTreeID and { heroTreeID = subTreeID } or nil
+end
+
 -- Helper function to set backdrop compatibility with WoW 12.0+
 local function SetBackdropCompat(frame, backdropInfo, backdropColor, backdropBorderColor)
     if frame.SetBackdrop then
@@ -87,6 +216,25 @@ function Scoreboard:Create()
     keystoneLevel:SetPoint("TOP", dungeonName, "BOTTOM", 0, -4)
     keystoneLevel:SetJustifyH("CENTER")
     frame.KeystoneLevel = keystoneLevel
+
+    -- Spec/Hero icon slots (icons only, centered)
+    local specIconFrame = CreateFrame("Frame", nil, frame)
+    specIconFrame:SetSize(24, 24)
+    specIconFrame:SetPoint("RIGHT", keystoneLevel, "LEFT", -8, 0)
+
+    local specIconText = specIconFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    specIconText:SetPoint("CENTER", specIconFrame, "CENTER", 0, 0)
+    specIconText:SetJustifyH("CENTER")
+    frame.SpecIconText = specIconText
+
+    local heroIconFrame = CreateFrame("Frame", nil, frame)
+    heroIconFrame:SetSize(24, 24)
+    heroIconFrame:SetPoint("LEFT", keystoneLevel, "RIGHT", 8, 0)
+
+    local heroIconText = heroIconFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    heroIconText:SetPoint("CENTER", heroIconFrame, "CENTER", 0, 0)
+    heroIconText:SetJustifyH("CENTER")
+    frame.HeroIconText = heroIconText
 
     -- Duration + Mob % - bigger and under dungeon name
     local duration = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
@@ -229,8 +377,11 @@ function Scoreboard:Create()
     closeButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -15, 15)
     
     local historyButton = MPT.UIUtils:CreateButton(frame, "History", buttonWidth, buttonHeight, function()
-        frame:Hide()
-        MPT.HistoryViewer:Show()
+        if MPT.HistoryViewer and MPT.HistoryViewer.ShowAtAnchor then
+            MPT.HistoryViewer:ShowAtAnchor(frame)
+        else
+            MPT.HistoryViewer:Show()
+        end
     end)
     historyButton:SetPoint("BOTTOMRIGHT", closeButton, "BOTTOMLEFT", -5, 0)
     
@@ -249,7 +400,37 @@ function Scoreboard:Show(runRecord)
     -- Populate run info
     frame.DungeonName:SetText(runRecord.dungeonName)
     frame.KeystoneLevel:SetText(string.format("Level: %d", runRecord.keystoneLevel))
-    
+
+    if not runRecord.specIcon then
+        local spec = GetPlayerSpecInfoSafe()
+        if spec and spec.specIcon then
+            runRecord.specIcon = spec.specIcon
+        end
+    end
+
+    if not runRecord.heroIcon then
+        local hero = GetHeroTalentInfoSafe()
+        if hero and hero.heroIcon then
+            runRecord.heroIcon = hero.heroIcon
+        end
+    end
+
+    if frame.SpecIconText then
+        if runRecord.specIcon then
+            frame.SpecIconText:SetText("|T" .. tostring(runRecord.specIcon) .. ":16:16:0:0|t")
+        else
+            frame.SpecIconText:SetText("")
+        end
+    end
+
+    if frame.HeroIconText then
+        if runRecord.heroIcon then
+            frame.HeroIconText:SetText("|T" .. tostring(runRecord.heroIcon) .. ":16:16:0:0|t")
+        else
+            frame.HeroIconText:SetText("")
+        end
+    end
+
     local minutes = math.floor(runRecord.duration / 60)
     local seconds = runRecord.duration % 60
     frame.Duration:SetText(string.format("%02d:%02d", minutes, seconds))

@@ -46,6 +46,7 @@ end
 
 function CombatLog:StartTracking()
     self.isTracking = true
+    self.startTime = time()
     self.playerGUID = UnitGUID("player")
     self.mobsKilled = 0
     self.mobsTotal = 0
@@ -98,6 +99,7 @@ end
 
 function CombatLog:StopTracking()
     self.isTracking = false
+    self.startTime = nil
     
     -- If using new API, fetch final data
     if self.useNewAPI then

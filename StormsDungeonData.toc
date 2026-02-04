@@ -17,6 +17,7 @@ Events.lua
 DamageMeterCompat.lua
 CombatLog.lua
 TestMode.lua
+UI/MinimapButton.xml
 UI/ScoreboardFrame.lua
 UI/HistoryViewer.lua
 UI/UIUtils.lua

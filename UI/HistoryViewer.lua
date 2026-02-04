@@ -5,6 +5,67 @@ local MPT = StormsDungeonData
 local HistoryViewer = {}
 MPT.HistoryViewer = HistoryViewer
 
+local function SafeCall(func, ...)
+    if type(func) ~= "function" then
+        return nil
+    end
+    local ok, a, b, c, d = pcall(func, ...)
+    if not ok then
+        return nil
+    end
+    return a, b, c, d
+end
+
+local function ResolveHeroIconFromTreeID(heroTreeID)
+    if not heroTreeID then
+        return nil
+    end
+
+    local configID
+    if C_ClassTalents and type(C_ClassTalents.GetActiveConfigID) == "function" then
+        configID = SafeCall(C_ClassTalents.GetActiveConfigID)
+    end
+    if not configID and C_Traits and type(C_Traits.GetActiveConfigID) == "function" then
+        configID = SafeCall(C_Traits.GetActiveConfigID)
+    end
+
+    local info
+    if C_Traits and type(C_Traits.GetSubTreeInfo) == "function" then
+        info = SafeCall(C_Traits.GetSubTreeInfo, configID, heroTreeID)
+        if not info then
+            info = SafeCall(C_Traits.GetSubTreeInfo, heroTreeID)
+        end
+    end
+    if type(info) == "table" then
+        local icon = info.icon or info.iconFileID or info.iconID
+        if icon then
+            return icon
+        end
+    end
+
+    if C_Traits and type(C_Traits.GetTreeInfo) == "function" then
+        info = SafeCall(C_Traits.GetTreeInfo, configID, heroTreeID)
+        if not info then
+            info = SafeCall(C_Traits.GetTreeInfo, heroTreeID)
+        end
+    end
+    if type(info) == "table" then
+        local icon = info.icon or info.iconFileID or info.iconID
+        if icon then
+            return icon
+        end
+    end
+
+    if C_ClassTalents and type(C_ClassTalents.GetHeroTalentSpecInfo) == "function" then
+        info = SafeCall(C_ClassTalents.GetHeroTalentSpecInfo, heroTreeID)
+        if type(info) == "table" then
+            return info.icon or info.iconFileID or info.iconID
+        end
+    end
+
+    return nil
+end
+
 -- Helper function to set backdrop compatibility with WoW 12.0+
 local function SetBackdropCompat(frame, backdropInfo, backdropColor, backdropBorderColor)
     if frame.SetBackdrop then
@@ -32,6 +93,9 @@ HistoryViewer.selectedCharacter = nil
 HistoryViewer.selectedDungeon = nil
 HistoryViewer.selectedDungeonName = nil
 HistoryViewer.selectedKeystoneLevel = nil
+HistoryViewer.selectedResult = nil
+HistoryViewer.selectedSpecName = nil
+HistoryViewer.selectedHeroName = nil
 
 function HistoryViewer:Create()
     if self.frame then
@@ -59,10 +123,6 @@ function HistoryViewer:Create()
     title:SetText("Run History")
     frame.Title = title
     
-    -- Close button
-    local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-    closeBtn:SetPoint("TOPRIGHT", frame.TitleBg, "TOPRIGHT", -5, -5)
-    closeBtn:SetScript("OnClick", function() frame:Hide() end)
     
     -- Summary bar (top)
     local summaryPanel = CreateFrame("Frame", nil, frame)
@@ -96,16 +156,17 @@ function HistoryViewer:Create()
         table.insert(frame.SummaryValues, valueText)
     end
 
-    -- Filter bar
+    -- Filter bar (2 rows, evenly spaced)
     local filterPanel = CreateFrame("Frame", nil, frame)
-    filterPanel:SetSize(980, 70)
-    filterPanel:SetPoint("TOPLEFT", summaryPanel, "BOTTOMLEFT", 0, -8)
+    filterPanel:SetSize(980, 100)
+    filterPanel:SetPoint("TOPLEFT", summaryPanel, "BOTTOMLEFT", 0, -12)
     SetBackdropCompat(filterPanel, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
     
-    local function CreateFilterDropdown(labelText, x, width)
+    local function CreateFilterDropdown(labelText, x, width, yOffset)
+        yOffset = yOffset or 0
         local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         label:SetText(labelText)
-        label:SetPoint("TOPLEFT", filterPanel, "TOPLEFT", x + 8, -8)
+        label:SetPoint("TOPLEFT", filterPanel, "TOPLEFT", x + 8, -8 + yOffset)
         label:SetTextColor(1, 0.84, 0, 1)
 
         -- UIDropDownMenuTemplate relies on the dropdown having a name for correct anchoring
@@ -114,7 +175,7 @@ function HistoryViewer:Create()
         if safeKey == "" then safeKey = "Filter" end
         local dropdownName = "StormsDungeonDataHistory" .. safeKey .. "Dropdown"
         local dropdown = CreateFrame("Frame", dropdownName, filterPanel, "UIDropDownMenuTemplate")
-        dropdown:SetPoint("TOPLEFT", filterPanel, "TOPLEFT", x - 12, -22)
+        dropdown:SetPoint("TOPLEFT", filterPanel, "TOPLEFT", x - 12, -22 + yOffset)
         UIDropDownMenu_SetWidth(dropdown, width)
         UIDropDownMenu_JustifyText(dropdown, "LEFT")
         UIDropDownMenu_SetText(dropdown, "All")
@@ -122,7 +183,7 @@ function HistoryViewer:Create()
         -- Make the selected value text larger for readability.
         local dropdownText = _G[dropdownName .. "Text"]
         if dropdownText and dropdownText.SetFontObject then
-            dropdownText:SetFontObject("GameFontNormal")
+            dropdownText:SetFontObject("GameFontNormalLarge")
         end
 
         -- Force the menu to open directly below the dropdown button.
@@ -158,27 +219,42 @@ function HistoryViewer:Create()
         return dropdown
     end
 
-    local dropdownWidth = 200
-    local colX = 10
-    frame.CharacterDropdown = CreateFilterDropdown("Character", colX, dropdownWidth)
-    colX = colX + 290
-    frame.DungeonDropdown = CreateFilterDropdown("Dungeon", colX, dropdownWidth)
-    colX = colX + 290
-    frame.KeystoneDropdown = CreateFilterDropdown("Keystone", colX, dropdownWidth)
+    local columns = 3
+    local colWidth = math.floor(980 / columns)
+    local dropdownWidth = colWidth - 30
+    local row1Y = 0
+    local row2Y = -46
+
+    local function ColX(col)
+        return 10 + ((col - 1) * colWidth)
+    end
+
+    -- Row 1
+    frame.DungeonDropdown = CreateFilterDropdown("Dungeon", ColX(1), dropdownWidth, row1Y)
+    frame.KeystoneDropdown = CreateFilterDropdown("Keystone", ColX(2), dropdownWidth, row1Y)
+    frame.ResultDropdown = CreateFilterDropdown("Result", ColX(3), dropdownWidth, row1Y)
+
+    -- Row 2
+    frame.CharacterDropdown = CreateFilterDropdown("Character", ColX(1), dropdownWidth, row2Y)
+    frame.SpecDropdown = CreateFilterDropdown("Spec", ColX(2), dropdownWidth, row2Y)
+    frame.HeroDropdown = CreateFilterDropdown("Hero", ColX(3), dropdownWidth, row2Y)
 
     local resetButton = MPT.UIUtils:CreateButton(filterPanel, "Reset Filters", 120, 22, function()
         self.selectedCharacter = nil
         self.selectedDungeon = nil
         self.selectedDungeonName = nil
         self.selectedKeystoneLevel = nil
+        self.selectedResult = nil
+        self.selectedSpecName = nil
+        self.selectedHeroName = nil
         self:PopulateFilters()
     end)
-    resetButton:SetPoint("BOTTOMRIGHT", filterPanel, "BOTTOMRIGHT", -12, 8)
+    resetButton:SetPoint("TOPLEFT", frame.HeroDropdown, "BOTTOMLEFT", 16, -6)
     frame.ResetFiltersButton = resetButton
     
-    -- Main stats panel
+    -- Main stats panel with proper spacing
     local statsPanel = CreateFrame("Frame", nil, frame)
-    statsPanel:SetPoint("TOPLEFT", filterPanel, "BOTTOMLEFT", 0, -10)
+    statsPanel:SetPoint("TOPLEFT", filterPanel, "BOTTOMLEFT", 0, -8)
     statsPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -10, 10)
     SetBackdropCompat(statsPanel, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
     
@@ -190,15 +266,20 @@ function HistoryViewer:Create()
     
     -- Averages & best stats grid
     local metricDefs = {
-        {key = "avgDuration", label = "Avg Duration"},
+        -- Row 1
         {key = "bestKeystoneLevel", label = "Best Level"},
-        {key = "avgDamage", label = "Avg Damage"},
-        {key = "bestDamage", label = "Best Damage"},
-        {key = "avgHealing", label = "Avg Healing"},
-        {key = "bestHealing", label = "Best Healing"},
-        {key = "avgInterrupts", label = "Avg Interrupts"},
-        {key = "bestInterrupts", label = "Best Interrupts"},
+        {key = "avgDuration", label = "Avg Duration"},
         {key = "avgMobPercentage", label = "Avg Mob %"},
+
+        -- Row 2
+        {key = "bestDamage", label = "Best Damage"},
+        {key = "bestHealing", label = "Best Healing"},
+        {key = "bestInterrupts", label = "Best Interrupts"},
+
+        -- Row 3
+        {key = "avgDamage", label = "Avg Damage"},
+        {key = "avgHealing", label = "Avg Healing"},
+        {key = "avgInterrupts", label = "Avg Interrupts"},
     }
 
     frame.StatValues = {}
@@ -228,6 +309,14 @@ function HistoryViewer:Create()
     -- Run history header
     local rows = math.ceil(#metricDefs / columns)
     local historyHeaderY = gridTopY - (rows * rowHeight) - 10
+
+    local statsSectionFrame = CreateFrame("Frame", nil, statsPanel)
+    statsSectionFrame:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 6, -6)
+    statsSectionFrame:SetPoint("TOPRIGHT", statsPanel, "TOPRIGHT", -6, -6)
+    statsSectionFrame:SetPoint("BOTTOMLEFT", statsPanel, "TOPLEFT", 6, historyHeaderY + 6)
+    statsSectionFrame:SetPoint("BOTTOMRIGHT", statsPanel, "TOPRIGHT", -6, historyHeaderY + 6)
+    SetBackdropCompat(statsSectionFrame, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
+
     local historyLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     historyLabel:SetText("Recent Runs:")
     historyLabel:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 10, historyHeaderY)
@@ -236,7 +325,7 @@ function HistoryViewer:Create()
     -- Recent runs column headers
     local headerBg = statsPanel:CreateTexture(nil, "BACKGROUND")
     headerBg:SetHeight(18)
-    headerBg:SetWidth(880)
+    headerBg:SetWidth(840)
     headerBg:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 10, historyHeaderY - 20)
     headerBg:SetColorTexture(0.12, 0.12, 0.18, 0.35)
 
@@ -251,20 +340,22 @@ function HistoryViewer:Create()
     end
 
     local colX = 5
-    HeaderText("Date", colX, 130, "LEFT"); colX = colX + 130
-    HeaderText("Dungeon", colX, 250, "LEFT"); colX = colX + 250
-    HeaderText("+", colX, 35, "CENTER"); colX = colX + 35
-    HeaderText("Result", colX, 75, "LEFT"); colX = colX + 75
+    HeaderText("Dungeon", colX, 175, "LEFT"); colX = colX + 175
+    HeaderText("Key", colX, 40, "CENTER"); colX = colX + 40
     HeaderText("Time", colX, 55, "CENTER"); colX = colX + 55
-    HeaderText("Mobs", colX, 55, "CENTER"); colX = colX + 55
-    HeaderText("DMG", colX, 95, "RIGHT"); colX = colX + 95
-    HeaderText("HPS", colX, 95, "RIGHT"); colX = colX + 95
-    HeaderText("INT", colX, 90, "CENTER")
+    HeaderText("Result", colX, 60, "LEFT"); colX = colX + 60
+    HeaderText("Mobs", colX, 50, "CENTER"); colX = colX + 50
+    HeaderText("Spec", colX, 80, "LEFT"); colX = colX + 80
+    HeaderText("Hero", colX, 80, "LEFT"); colX = colX + 80
+    HeaderText("Date", colX, 110, "LEFT"); colX = colX + 110
+    HeaderText("DMG", colX, 70, "RIGHT"); colX = colX + 70
+    HeaderText("HPS", colX, 70, "RIGHT"); colX = colX + 70
+    HeaderText("INT", colX, 50, "CENTER")
     
-    -- Run history scroll
-    frame.RunScroll, frame.RunContent = MPT.UIUtils:CreateScrollFrame(statsPanel, 900, 300)
+    -- Run history scroll (reduced width to fit scrollbar within bounds, anchored right)
+    frame.RunScroll, frame.RunContent = MPT.UIUtils:CreateScrollFrame(statsPanel, 860, 300)
     frame.RunScroll:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 10, historyHeaderY - 40)
-    frame.RunScroll:SetPoint("BOTTOMLEFT", statsPanel, "BOTTOMLEFT", 10, 10)
+    frame.RunScroll:SetPoint("BOTTOMRIGHT", statsPanel, "BOTTOMRIGHT", -28, 10)
     if frame.RunContent.SetBackdrop then
         frame.RunContent:SetBackdrop(nil)
     end
@@ -283,6 +374,19 @@ function HistoryViewer:Show()
     frame:Show()
 end
 
+function HistoryViewer:ShowAtAnchor(anchorFrame)
+    local frame = self:Create()
+    self.selectedDungeon = nil
+    self.selectedDungeonName = nil
+    self:PopulateFilters()
+
+    if anchorFrame and frame then
+        frame:ClearAllPoints()
+        frame:SetPoint("TOPLEFT", anchorFrame, "TOPRIGHT", 12, 0)
+    end
+    frame:Show()
+end
+
 function HistoryViewer:Hide()
     if self.frame then
         self.frame:Hide()
@@ -297,7 +401,7 @@ function HistoryViewer:PopulateFilters()
                 info.text = item.text
                 info.value = item.value
                 -- Larger dropdown list item text.
-                info.fontObject = "GameFontNormal"
+                info.fontObject = "GameFontHighlight"
                 info.func = function()
                     UIDropDownMenu_SetSelectedValue(dropdown, item.value)
                     UIDropDownMenu_SetText(dropdown, item.text)
@@ -320,12 +424,22 @@ function HistoryViewer:PopulateFilters()
     end
 
     -- Character dropdown
+    local function ColorizeNameByClass(name, classToken)
+        if classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken] and RAID_CLASS_COLORS[classToken].colorStr then
+            return "|c" .. RAID_CLASS_COLORS[classToken].colorStr .. name .. "|r"
+        end
+        if MPT.Utils and MPT.Utils.GetClassColoredName then
+            return MPT.Utils:GetClassColoredName(name, classToken)
+        end
+        return name
+    end
+
     local characters = MPT.Database:GetAllCharacters()
     local charItems = {
         {text = "All Characters", value = "ALL"},
     }
     for _, char in ipairs(characters) do
-        local displayName = (MPT.Utils and MPT.Utils.GetClassColoredName) and MPT.Utils:GetClassColoredName(char.name, char.class) or char.name
+        local displayName = ColorizeNameByClass(char.name, char.class)
         table.insert(charItems, {
             text = displayName .. " - " .. char.realm,
             value = char.name .. "-" .. char.realm,
@@ -391,10 +505,189 @@ function HistoryViewer:PopulateFilters()
         self:UpdateDisplay()
     end)
 
+    -- Result dropdown (Completed/Failed)
+    local resultItems = {
+        {text = "All Results", value = "ALL"},
+        {text = "Completed", value = true},
+        {text = "Failed", value = false},
+    }
+
+    local selectedResultValue = self.selectedResult or "ALL"
+    InitializeDropdown(self.frame.ResultDropdown, resultItems, selectedResultValue, "All Results", function(item)
+        if item.value == "ALL" then
+            self.selectedResult = nil
+        else
+            self.selectedResult = item.value
+        end
+        self:UpdateDisplay()
+    end)
+
+    -- Spec dropdown
+    local specItems = {
+        {text = "All Specs", value = "ALL"},
+    }
+    local specCounts = {}
+    local specUnknownCount = 0
+    local runs = (StormsDungeonDataDB and StormsDungeonDataDB.runs) or {}
+    for _, run in ipairs(runs) do
+        local specName = run.specName
+        if specName and specName ~= "" then
+            specCounts[specName] = (specCounts[specName] or 0) + 1
+        else
+            specUnknownCount = specUnknownCount + 1
+        end
+    end
+    local specNames = {}
+    for name in pairs(specCounts) do
+        table.insert(specNames, name)
+    end
+    table.sort(specNames)
+    if specUnknownCount > 0 then
+        table.insert(specItems, {text = "Unknown", value = "UNKNOWN"})
+    end
+    for _, name in ipairs(specNames) do
+        table.insert(specItems, {text = name .. " (" .. specCounts[name] .. ")", value = name})
+    end
+
+    local selectedSpecValue = self.selectedSpecName or "ALL"
+    InitializeDropdown(self.frame.SpecDropdown, specItems, selectedSpecValue, "All Specs", function(item)
+        if item.value == "ALL" then
+            self.selectedSpecName = nil
+        else
+            self.selectedSpecName = item.value
+        end
+        self:UpdateDisplay()
+    end)
+
+    -- Hero dropdown
+    local heroItems = {
+        {text = "All Hero Talents", value = "ALL"},
+    }
+    local heroCounts = {}
+    local heroUnknownCount = 0
+    for _, run in ipairs(runs) do
+        local heroName = run.heroName
+        if heroName and heroName ~= "" then
+            heroCounts[heroName] = (heroCounts[heroName] or 0) + 1
+        else
+            heroUnknownCount = heroUnknownCount + 1
+        end
+    end
+    local heroNames = {}
+    for name in pairs(heroCounts) do
+        table.insert(heroNames, name)
+    end
+    table.sort(heroNames)
+    if heroUnknownCount > 0 then
+        table.insert(heroItems, {text = "Unknown", value = "UNKNOWN"})
+    end
+    for _, name in ipairs(heroNames) do
+        table.insert(heroItems, {text = name .. " (" .. heroCounts[name] .. ")", value = name})
+    end
+
+    local selectedHeroValue = self.selectedHeroName or "ALL"
+    InitializeDropdown(self.frame.HeroDropdown, heroItems, selectedHeroValue, "All Hero Talents", function(item)
+        if item.value == "ALL" then
+            self.selectedHeroName = nil
+        else
+            self.selectedHeroName = item.value
+        end
+        self:UpdateDisplay()
+    end)
+
     self:UpdateDisplay()
 end
 
 function HistoryViewer:UpdateDisplay()
+    local function ComputeStatsFromRuns(runs, characterName)
+        if not runs or #runs == 0 then
+            return nil
+        end
+
+        local stats = {
+            totalRuns = 0,
+            completedRuns = 0,
+            failedRuns = 0,
+            avgDuration = 0,
+            avgKeystoneLevel = 0,
+            avgDamage = 0,
+            avgHealing = 0,
+            avgInterrupts = 0,
+            avgMobPercentage = 0,
+            bestKeystoneLevel = 0,
+            bestDuration = 0,
+            bestTime = nil,
+            bestDamage = 0,
+            bestHealing = 0,
+            bestInterrupts = 0,
+        }
+
+        local totalDuration = 0
+        local totalLevel = 0
+        local totalDamage = 0
+        local totalHealing = 0
+        local totalInterrupts = 0
+        local totalMobPercentage = 0
+        local playerRunCount = 0
+
+        for _, run in ipairs(runs) do
+            local runLevel = (run.keystoneLevel or run.dungeonLevel or 0)
+            stats.totalRuns = stats.totalRuns + 1
+            if run.completed then
+                stats.completedRuns = stats.completedRuns + 1
+            else
+                stats.failedRuns = stats.failedRuns + 1
+            end
+
+            totalDuration = totalDuration + (run.duration or 0)
+            totalLevel = totalLevel + (runLevel or 0)
+            totalMobPercentage = totalMobPercentage + (run.overallMobPercentage or 0)
+
+            if run.playerStats then
+                for _, pstats in pairs(run.playerStats) do
+                    stats.bestDamage = math.max(stats.bestDamage, pstats.damage or 0)
+                    stats.bestHealing = math.max(stats.bestHealing, pstats.healing or 0)
+                    stats.bestInterrupts = math.max(stats.bestInterrupts, pstats.interrupts or 0)
+                end
+            elseif run.players then
+                for _, p in ipairs(run.players) do
+                    stats.bestDamage = math.max(stats.bestDamage, p.damage or 0)
+                    stats.bestHealing = math.max(stats.bestHealing, p.healing or 0)
+                    stats.bestInterrupts = math.max(stats.bestInterrupts, p.interrupts or 0)
+                end
+            end
+
+            if run.players then
+                for _, player in ipairs(run.players) do
+                    if player.name == characterName or not characterName then
+                        totalDamage = totalDamage + (player.damage or 0)
+                        totalHealing = totalHealing + (player.healing or 0)
+                        totalInterrupts = totalInterrupts + (player.interrupts or 0)
+                        playerRunCount = playerRunCount + 1
+                    end
+                end
+            end
+
+            if runLevel and runLevel > stats.bestKeystoneLevel then
+                stats.bestKeystoneLevel = runLevel
+            end
+
+            if run.duration and run.duration > stats.bestDuration then
+                stats.bestDuration = run.duration
+                stats.bestTime = run.timestamp
+            end
+        end
+
+        stats.avgDuration = stats.totalRuns > 0 and math.floor(totalDuration / stats.totalRuns) or 0
+        stats.avgKeystoneLevel = stats.totalRuns > 0 and math.floor(totalLevel / stats.totalRuns) or 0
+        stats.avgDamage = playerRunCount > 0 and math.floor(totalDamage / playerRunCount) or 0
+        stats.avgHealing = playerRunCount > 0 and math.floor(totalHealing / playerRunCount) or 0
+        stats.avgInterrupts = playerRunCount > 0 and math.floor(totalInterrupts / playerRunCount) or 0
+        stats.avgMobPercentage = stats.totalRuns > 0 and math.floor(totalMobPercentage / stats.totalRuns) or 0
+
+        return stats
+    end
+
     local charName = nil
     local realm = nil
     if self.selectedCharacter then
@@ -404,12 +697,81 @@ function HistoryViewer:UpdateDisplay()
     local stats
     if self.selectedDungeon or self.selectedDungeonName then
         self.frame.StatsTitle:SetText("Dungeon Statistics")
-        stats = MPT.Database:GetDungeonStatistics(self.selectedDungeon, charName, realm, self.selectedDungeonName, self.selectedKeystoneLevel)
     else
         self.frame.StatsTitle:SetText("Overall Statistics")
-        stats = MPT.Database:GetOverallStatistics(charName, realm, self.selectedKeystoneLevel)
     end
     
+    -- Populate run history
+    local allRuns
+    if self.selectedDungeon or self.selectedDungeonName then
+        allRuns = MPT.Database:GetRunsByDungeon(self.selectedDungeon, charName, realm, self.selectedDungeonName)
+    else
+        allRuns = charName and MPT.Database:GetRunsByCharacter(charName, realm) or (StormsDungeonDataDB and StormsDungeonDataDB.runs) or {}
+        table.sort(allRuns, function(a, b)
+            return (a.timestamp or 0) > (b.timestamp or 0)
+        end)
+    end
+
+    local runs = allRuns
+
+    -- Filter by keystone level if selected
+    if self.selectedKeystoneLevel then
+        local filteredRuns = {}
+        for _, run in ipairs(runs) do
+            if (run.dungeonLevel or run.keystoneLevel) == self.selectedKeystoneLevel then
+                table.insert(filteredRuns, run)
+            end
+        end
+        runs = filteredRuns
+    end
+    
+    -- Filter by result (completed/failed) if selected
+    if self.selectedResult ~= nil then
+        local filteredRuns = {}
+        for _, run in ipairs(runs) do
+            if self.selectedResult == true and run.completed then
+                table.insert(filteredRuns, run)
+            elseif self.selectedResult == false and not run.completed then
+                table.insert(filteredRuns, run)
+            end
+        end
+        runs = filteredRuns
+    end
+
+    -- Filter by spec if selected
+    if self.selectedSpecName then
+        local filteredRuns = {}
+        for _, run in ipairs(runs) do
+            local specName = run.specName
+            if self.selectedSpecName == "UNKNOWN" then
+                if not specName or specName == "" then
+                    table.insert(filteredRuns, run)
+                end
+            elseif specName == self.selectedSpecName then
+                table.insert(filteredRuns, run)
+            end
+        end
+        runs = filteredRuns
+    end
+
+    -- Filter by hero talent if selected
+    if self.selectedHeroName then
+        local filteredRuns = {}
+        for _, run in ipairs(runs) do
+            local heroName = run.heroName
+            if self.selectedHeroName == "UNKNOWN" then
+                if not heroName or heroName == "" then
+                    table.insert(filteredRuns, run)
+                end
+            elseif heroName == self.selectedHeroName then
+                table.insert(filteredRuns, run)
+            end
+        end
+        runs = filteredRuns
+    end
+
+    stats = ComputeStatsFromRuns(runs, charName)
+
     if stats then
         if self.frame.SummaryValues then
             self.frame.SummaryValues[1]:SetText(tostring(stats.totalRuns))
@@ -429,30 +791,6 @@ function HistoryViewer:UpdateDisplay()
             self.frame.StatValues.bestInterrupts:SetText(tostring(stats.bestInterrupts))
             self.frame.StatValues.avgMobPercentage:SetText(string.format("%.1f%%", stats.avgMobPercentage))
         end
-    end
-    
-    -- Populate run history
-    local allRuns
-    if self.selectedDungeon or self.selectedDungeonName then
-        allRuns = MPT.Database:GetRunsByDungeon(self.selectedDungeon, charName, realm, self.selectedDungeonName)
-    else
-        allRuns = charName and MPT.Database:GetRunsByCharacter(charName, realm) or (StormsDungeonDataDB and StormsDungeonDataDB.runs) or {}
-        table.sort(allRuns, function(a, b)
-            return (a.timestamp or 0) > (b.timestamp or 0)
-        end)
-    end
-
-    local runs = allRuns
-    
-    -- Filter by keystone level if selected
-    if self.selectedKeystoneLevel then
-        local filteredRuns = {}
-        for _, run in ipairs(runs) do
-            if (run.dungeonLevel or run.keystoneLevel) == self.selectedKeystoneLevel then
-                table.insert(filteredRuns, run)
-            end
-        end
-        runs = filteredRuns
     end
     
     for _, row in ipairs(self.frame.RunRows) do
@@ -492,8 +830,18 @@ function HistoryViewer:UpdateDisplay()
     local runY = 0
     for idx, run in ipairs(runs) do
         local runRow = CreateFrame("Frame", nil, self.frame.RunContent)
-        runRow:SetSize(880, 22)
+        runRow:SetSize(840, 22)
         runRow:SetPoint("TOPLEFT", self.frame.RunContent, "TOPLEFT", 0, -runY)
+        runRow:EnableMouse(true)
+        runRow:SetScript("OnMouseUp", function(_, button)
+            if button == "LeftButton" then
+                if MPT.UI and MPT.UI.ShowScoreboard then
+                    MPT.UI:ShowScoreboard(run)
+                elseif MPT.Scoreboard and MPT.Scoreboard.Show then
+                    MPT.Scoreboard:Show(run)
+                end
+            end
+        end)
 
         local bg = runRow:CreateTexture(nil, "BACKGROUND")
         bg:SetAllPoints(runRow)
@@ -516,33 +864,19 @@ function HistoryViewer:UpdateDisplay()
 
         local x = 5
 
-        local dateText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dateText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        dateText:SetWidth(130)
-        dateText:SetJustifyH("LEFT")
-        dateText:SetText(date("%Y-%m-%d %H:%M", run.timestamp or time()))
-        x = x + 130
-
         local dungeonText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         dungeonText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        dungeonText:SetWidth(250)
+        dungeonText:SetWidth(175)
         dungeonText:SetJustifyH("LEFT")
         dungeonText:SetText(run.dungeonName or "--")
-        x = x + 250
+        x = x + 175
 
         local levelText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         levelText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        levelText:SetWidth(35)
+        levelText:SetWidth(40)
         levelText:SetJustifyH("CENTER")
         levelText:SetText("+" .. tostring(level))
-        x = x + 35
-
-        local completedText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        completedText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        completedText:SetWidth(75)
-        completedText:SetJustifyH("LEFT")
-        completedText:SetText(run.completed and "|cff00ff00Completed|r" or "|cffff0000Failed|r")
-        x = x + 75
+        x = x + 40
 
         local durationText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         durationText:SetPoint("LEFT", runRow, "LEFT", x, 0)
@@ -551,16 +885,63 @@ function HistoryViewer:UpdateDisplay()
         durationText:SetText(MPT.Utils:FormatDuration(run.duration or 0))
         x = x + 55
 
+        local completedText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        completedText:SetPoint("LEFT", runRow, "LEFT", x, 0)
+        completedText:SetWidth(60)
+        completedText:SetJustifyH("LEFT")
+        completedText:SetText(run.completed and "|cff00ff00Completed|r" or "|cffff0000Failed|r")
+        x = x + 60
+
         local mobText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         mobText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        mobText:SetWidth(55)
+        mobText:SetWidth(50)
         mobText:SetJustifyH("CENTER")
         mobText:SetText(string.format("%.1f%%", mobPct))
-        x = x + 55
+        x = x + 50
+
+        local specText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        specText:SetPoint("LEFT", runRow, "LEFT", x, 0)
+        specText:SetWidth(80)
+        specText:SetJustifyH("CENTER")
+        do
+            local label = ""
+            if run.specIcon then
+                label = "|T" .. tostring(run.specIcon) .. ":14:14:0:0|t"
+            end
+            specText:SetText(label)
+        end
+        x = x + 80
+
+        local heroText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        heroText:SetPoint("LEFT", runRow, "LEFT", x, 0)
+        heroText:SetWidth(80)
+        heroText:SetJustifyH("CENTER")
+        do
+            local label = ""
+            local heroIcon = run.heroIcon
+            if not heroIcon and run.heroTreeID then
+                heroIcon = ResolveHeroIconFromTreeID(run.heroTreeID)
+                if heroIcon then
+                    run.heroIcon = heroIcon
+                end
+            end
+            if heroIcon then
+                label = "|T" .. tostring(heroIcon) .. ":14:14:0:0|t"
+            end
+            heroText:SetText(label)
+        end
+        x = x + 80
+
+        local dateText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        dateText:SetPoint("LEFT", runRow, "LEFT", x, 0)
+        dateText:SetWidth(110)
+        dateText:SetJustifyH("LEFT")
+        dateText:SetText(date("%m-%d-%y %H:%M", run.timestamp or time()))
+        x = x + 110
 
         local dmgText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         dmgText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        dmgText:SetWidth(95)
+        dmgText:SetWidth(70)
         dmgText:SetJustifyH("RIGHT")
         local dungeonKey = run.dungeonName or tostring(run.dungeonId or run.dungeonID or run.dungeon or "--")
         local dmgValueText = MPT.Utils:FormatNumber(bestDamage)
@@ -568,22 +949,22 @@ function HistoryViewer:UpdateDisplay()
             dmgValueText = "|cffff8000" .. dmgValueText .. "|r"
         end
         dmgText:SetText(dmgValueText)
-        x = x + 95
+        x = x + 70
 
         local healText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         healText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        healText:SetWidth(95)
+        healText:SetWidth(70)
         healText:SetJustifyH("RIGHT")
         local healValueText = MPT.Utils:FormatNumber(bestHealing)
         if (bestHealing or 0) > 0 and (bestHealing or 0) >= (pbHealingByDungeon[dungeonKey] or 0) then
             healValueText = "|cffff8000" .. healValueText .. "|r"
         end
         healText:SetText(healValueText)
-        x = x + 95
+        x = x + 70
 
         local intText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         intText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        intText:SetWidth(90)
+        intText:SetWidth(50)
         intText:SetJustifyH("CENTER")
         local intValueText = tostring(bestInterrupts)
         if (bestInterrupts or 0) > 0 and (bestInterrupts or 0) >= (pbInterruptsByDungeon[dungeonKey] or 0) then

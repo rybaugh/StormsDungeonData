@@ -3,9 +3,8 @@
 
 local MPT = StormsDungeonData
 MPT.Database = MPT.Database or {}
-local Database = MPT.Database
 
-function Database:CreateDefaultDB()
+function MPT.Database:CreateDefaultDB()
     return {
         version = 1,
         runs = {},  -- List of all runs across all characters
@@ -16,7 +15,7 @@ function Database:CreateDefaultDB()
     }
 end
 
-function Database:Initialize()
+function MPT.Database:Initialize()
     -- Verify DB structure
     if not StormsDungeonDataDB then
         StormsDungeonDataDB = self:CreateDefaultDB()
@@ -37,12 +36,13 @@ function Database:Initialize()
 end
 
 -- Create a new run record
-function Database:CreateRunRecord(dungeonID, dungeonName, keystoneLevel, completed, duration, players)
+function MPT.Database:CreateRunRecord(dungeonID, dungeonName, keystoneLevel, completed, duration, players)
     return {
         id = self:GenerateRunID(),
         timestamp = time(),
         character = MPT:GetPlayerInfo().name,
         realm = GetRealmName(),
+        characterClass = MPT:GetPlayerInfo().class,
         dungeonID = dungeonID,
         dungeonName = dungeonName,
         keystoneLevel = keystoneLevel,
@@ -58,7 +58,7 @@ function Database:CreateRunRecord(dungeonID, dungeonName, keystoneLevel, complet
 end
 
 -- Create player stat record
-function Database:CreatePlayerStats(unitID, name, class, role)
+function MPT.Database:CreatePlayerStats(unitID, name, class, role)
     return {
         unitID = unitID,
         name = name,
@@ -76,7 +76,7 @@ function Database:CreatePlayerStats(unitID, name, class, role)
 end
 
 -- Save a completed run
-function Database:SaveRun(runRecord)
+function MPT.Database:SaveRun(runRecord)
     if not runRecord or not runRecord.dungeonID then
         print("|cff00ffaa[StormsDungeonData]|r Error: Invalid run record")
         return false
@@ -87,7 +87,7 @@ function Database:SaveRun(runRecord)
 end
 
 -- Get all runs for a specific character
-function Database:GetRunsByCharacter(characterName, realm)
+function MPT.Database:GetRunsByCharacter(characterName, realm)
     local result = {}
     for _, run in ipairs(StormsDungeonDataDB.runs) do
         if run.character == characterName and run.realm == realm then
@@ -98,7 +98,7 @@ function Database:GetRunsByCharacter(characterName, realm)
 end
 
 -- Get runs for a specific dungeon
-function Database:GetRunsByDungeon(dungeonID, characterName, realm, dungeonName)
+function MPT.Database:GetRunsByDungeon(dungeonID, characterName, realm, dungeonName)
     local result = {}
     local runs = characterName and self:GetRunsByCharacter(characterName, realm) or StormsDungeonDataDB.runs
     local hasDungeonID = (dungeonID and dungeonID ~= 0)
@@ -115,7 +115,7 @@ function Database:GetRunsByDungeon(dungeonID, characterName, realm, dungeonName)
 end
 
 -- Get all unique characters in database
-function Database:GetAllCharacters()
+function MPT.Database:GetAllCharacters()
     local characters = {}
     local seen = {}
     
@@ -127,10 +127,19 @@ function Database:GetAllCharacters()
         
         if not seen[key] then
             seen[key] = true
+            local classToken = run.characterClass
+            if not classToken and run.players then
+                for _, p in ipairs(run.players) do
+                    if p and p.name == character and p.class then
+                        classToken = p.class
+                        break
+                    end
+                end
+            end
             table.insert(characters, {
                 name = character,
                 realm = realm,
-                class = (run.players and run.players[1] and run.players[1].class) or "UNKNOWN",
+                class = classToken or "UNKNOWN",
             })
         end
     end
@@ -146,7 +155,7 @@ function Database:GetAllCharacters()
 end
 
 -- Get all unique dungeons
-function Database:GetAllDungeons()
+function MPT.Database:GetAllDungeons()
     local dungeons = {}
     local seen = {}
     
@@ -177,12 +186,12 @@ function Database:GetAllDungeons()
 end
 
 -- Generate unique run ID
-function Database:GenerateRunID()
+function MPT.Database:GenerateRunID()
     return MPT:GetPlayerInfo().name .. "-" .. GetRealmName() .. "-" .. time() .. "-" .. math.random(1000, 9999)
 end
 
 -- Get run statistics for a dungeon
-function Database:GetDungeonStatistics(dungeonID, characterName, realm, dungeonName, keystoneLevelFilter)
+function MPT.Database:GetDungeonStatistics(dungeonID, characterName, realm, dungeonName, keystoneLevelFilter, resultFilter)
     local runs = self:GetRunsByDungeon(dungeonID, characterName, realm, dungeonName)
     
     if #runs == 0 then
@@ -218,50 +227,64 @@ function Database:GetDungeonStatistics(dungeonID, characterName, realm, dungeonN
     for _, run in ipairs(runs) do
         local runLevel = (run.keystoneLevel or run.dungeonLevel)
         if (not keystoneLevelFilter) or (runLevel == keystoneLevelFilter) then
-            stats.totalRuns = stats.totalRuns + 1
-
-        if run.completed then
-            stats.completedRuns = stats.completedRuns + 1
-        else
-            stats.failedRuns = stats.failedRuns + 1
-        end
-        
-        totalDuration = totalDuration + (run.duration or 0)
-        totalLevel = totalLevel + (runLevel or 0)
-        totalMobPercentage = totalMobPercentage + (run.overallMobPercentage or 0)
-        
-        -- Get best stats from playerStats or players
-        if run.playerStats then
-            for name, pstats in pairs(run.playerStats) do
-                bestDamage = math.max(bestDamage, pstats.damage or 0)
-                bestHealing = math.max(bestHealing, pstats.healing or 0)
-                bestInterrupts = math.max(bestInterrupts, pstats.interrupts or 0)
-            end
-        end
-        
-        -- Find player stats for current character
-        if run.players then
-            for _, player in ipairs(run.players) do
-                if player.name == characterName or not characterName then
-                    totalDamage = totalDamage + (player.damage or 0)
-                    totalHealing = totalHealing + (player.healing or 0)
-                    totalInterrupts = totalInterrupts + (player.interrupts or 0)
-                    playerRunCount = playerRunCount + 1
+            -- Apply result filter (completed/failed)
+            local allowRun = true
+            if resultFilter ~= nil then
+                if resultFilter == true and not run.completed then
+                    allowRun = false
+                end
+                if resultFilter == false and run.completed then
+                    allowRun = false
                 end
             end
-        end
-        
-        if run.keystoneLevel and run.keystoneLevel > stats.bestKeystoneLevel then
-            stats.bestKeystoneLevel = run.keystoneLevel
-        elseif run.dungeonLevel and run.dungeonLevel > stats.bestKeystoneLevel then
-            stats.bestKeystoneLevel = run.dungeonLevel
-        end
-        
-        if run.duration and run.duration > stats.bestDuration then
-            stats.bestDuration = run.duration
-            stats.bestTime = run.timestamp
-        end
 
+            if allowRun then
+                stats.totalRuns = stats.totalRuns + 1
+
+                if run.completed then
+                    stats.completedRuns = stats.completedRuns + 1
+                else
+                    stats.failedRuns = stats.failedRuns + 1
+                end
+            
+            totalDuration = totalDuration + (run.duration or 0)
+            totalLevel = totalLevel + (runLevel or 0)
+            totalMobPercentage = totalMobPercentage + (run.overallMobPercentage or 0)
+            
+            -- Get best stats from completed runs only
+            if run.completed and run.playerStats then
+                for name, pstats in pairs(run.playerStats) do
+                    bestDamage = math.max(bestDamage, pstats.damage or 0)
+                    bestHealing = math.max(bestHealing, pstats.healing or 0)
+                    bestInterrupts = math.max(bestInterrupts, pstats.interrupts or 0)
+                end
+            end
+            
+            -- Find player stats for current character
+            if run.players then
+                for _, player in ipairs(run.players) do
+                    if player.name == characterName or not characterName then
+                        totalDamage = totalDamage + (player.damage or 0)
+                        totalHealing = totalHealing + (player.healing or 0)
+                        totalInterrupts = totalInterrupts + (player.interrupts or 0)
+                        playerRunCount = playerRunCount + 1
+                    end
+                end
+            end
+            
+            if run.completed then
+                if run.keystoneLevel and run.keystoneLevel > stats.bestKeystoneLevel then
+                    stats.bestKeystoneLevel = run.keystoneLevel
+                elseif run.dungeonLevel and run.dungeonLevel > stats.bestKeystoneLevel then
+                    stats.bestKeystoneLevel = run.dungeonLevel
+                end
+
+                if run.duration and run.duration > stats.bestDuration then
+                    stats.bestDuration = run.duration
+                    stats.bestTime = run.timestamp
+                end
+            end
+            end
         end
     end
 
@@ -283,7 +306,7 @@ function Database:GetDungeonStatistics(dungeonID, characterName, realm, dungeonN
 end
 
 -- Get overall run statistics (across all dungeons)
-function Database:GetOverallStatistics(characterName, realm, keystoneLevelFilter)
+function MPT.Database:GetOverallStatistics(characterName, realm, keystoneLevelFilter, resultFilter)
     local runs = characterName and self:GetRunsByCharacter(characterName, realm) or StormsDungeonDataDB.runs
 
     if not runs or #runs == 0 then
@@ -319,30 +342,44 @@ function Database:GetOverallStatistics(characterName, realm, keystoneLevelFilter
     for _, run in ipairs(runs) do
         local runLevel = (run.keystoneLevel or run.dungeonLevel)
         if (not keystoneLevelFilter) or (runLevel == keystoneLevelFilter) then
-            stats.totalRuns = stats.totalRuns + 1
-
-            if run.completed then
-                stats.completedRuns = stats.completedRuns + 1
-            else
-                stats.failedRuns = stats.failedRuns + 1
+            -- Apply result filter (completed/failed)
+            local allowRun = true
+            if resultFilter ~= nil then
+                if resultFilter == true and not run.completed then
+                    allowRun = false
+                end
+                if resultFilter == false and run.completed then
+                    allowRun = false
+                end
             end
+
+            if allowRun then
+                stats.totalRuns = stats.totalRuns + 1
+
+                if run.completed then
+                    stats.completedRuns = stats.completedRuns + 1
+                else
+                    stats.failedRuns = stats.failedRuns + 1
+                end
 
             totalDuration = totalDuration + (run.duration or 0)
             totalLevel = totalLevel + (runLevel or 0)
             totalMobPercentage = totalMobPercentage + (run.overallMobPercentage or 0)
 
-            -- Best stats from playerStats or players
-            if run.playerStats then
-                for _, pstats in pairs(run.playerStats) do
-                    bestDamage = math.max(bestDamage, pstats.damage or 0)
-                    bestHealing = math.max(bestHealing, pstats.healing or 0)
-                    bestInterrupts = math.max(bestInterrupts, pstats.interrupts or 0)
-                end
-            elseif run.players then
-                for _, player in ipairs(run.players) do
-                    bestDamage = math.max(bestDamage, player.damage or 0)
-                    bestHealing = math.max(bestHealing, player.healing or 0)
-                    bestInterrupts = math.max(bestInterrupts, player.interrupts or 0)
+            -- Best stats from completed runs only
+            if run.completed then
+                if run.playerStats then
+                    for _, pstats in pairs(run.playerStats) do
+                        bestDamage = math.max(bestDamage, pstats.damage or 0)
+                        bestHealing = math.max(bestHealing, pstats.healing or 0)
+                        bestInterrupts = math.max(bestInterrupts, pstats.interrupts or 0)
+                    end
+                elseif run.players then
+                    for _, player in ipairs(run.players) do
+                        bestDamage = math.max(bestDamage, player.damage or 0)
+                        bestHealing = math.max(bestHealing, player.healing or 0)
+                        bestInterrupts = math.max(bestInterrupts, player.interrupts or 0)
+                    end
                 end
             end
 
@@ -358,13 +395,16 @@ function Database:GetOverallStatistics(characterName, realm, keystoneLevelFilter
                 end
             end
 
-            if runLevel and runLevel > stats.bestKeystoneLevel then
-                stats.bestKeystoneLevel = runLevel
-            end
+            if run.completed then
+                if runLevel and runLevel > stats.bestKeystoneLevel then
+                    stats.bestKeystoneLevel = runLevel
+                end
 
-            if run.duration and run.duration > stats.bestDuration then
-                stats.bestDuration = run.duration
-                stats.bestTime = run.timestamp
+                if run.duration and run.duration > stats.bestDuration then
+                    stats.bestDuration = run.duration
+                    stats.bestTime = run.timestamp
+                end
+            end
             end
         end
     end
@@ -387,7 +427,7 @@ function Database:GetOverallStatistics(characterName, realm, keystoneLevelFilter
 end
 
 -- Get best performance stats
-function Database:GetBestStats(character, dungeon)
+function MPT.Database:GetBestStats(character, dungeon)
     local bestDamage = 0
     local bestHealing = 0
     local bestInterrupts = 0
@@ -398,7 +438,7 @@ function Database:GetBestStats(character, dungeon)
     for _, run in ipairs(StormsDungeonDataDB.runs) do
         local characterOk = (not character) or (not run.character) or (run.character == character)
         local dungeonOk = (not dungeon) or (not run.dungeonName) or (run.dungeonName == dungeon)
-        if characterOk and dungeonOk then
+        if characterOk and dungeonOk and run.completed then
         -- Get max stats from playerStats
         local maxDamage = 0
         local maxHealing = 0
@@ -441,7 +481,7 @@ function Database:GetBestStats(character, dungeon)
 end
 
 -- Get all unique keystone levels
-function Database:GetAllKeystoneLevels()
+function MPT.Database:GetAllKeystoneLevels()
     local levels = {}
     local seen = {}
     
