@@ -23,6 +23,7 @@ CombatLog.mobsTotal = 0
 CombatLog.mobGuids = {}  -- Track unique mobs
 CombatLog.playerStats = {}  -- Track stats by player
 CombatLog.useNewAPI = MPT.DamageMeterCompat.IsWoW12Plus
+CombatLog.allowCLEUFallback = true
 CombatLog.playerGUIDToName = {}
 CombatLog.petOwnerNameByGUID = {}
 
@@ -60,11 +61,12 @@ function CombatLog:StartTracking()
         local unitID = "party" .. i
         if UnitExists(unitID) then
             local name = UnitName(unitID)
+            local shortName = NormalizeUnitName(name) or name
             local guid = UnitGUID(unitID)
             if guid and name then
-                self.playerGUIDToName[guid] = name
+                self.playerGUIDToName[guid] = shortName
             end
-            self.playerStats[name] = {
+            self.playerStats[shortName] = {
                 damage = 0,
                 healing = 0,
                 interrupts = 0,
@@ -76,11 +78,12 @@ function CombatLog:StartTracking()
     end
     
     local playerName = UnitName("player")
+    local playerShortName = NormalizeUnitName(playerName) or playerName
     local playerGUID = UnitGUID("player")
-    if playerGUID and playerName then
-        self.playerGUIDToName[playerGUID] = playerName
+    if playerGUID and playerShortName then
+        self.playerGUIDToName[playerGUID] = playerShortName
     end
-    self.playerStats[playerName] = {
+    self.playerStats[playerShortName] = {
         damage = 0,
         healing = 0,
         interrupts = 0,
@@ -128,6 +131,9 @@ function CombatLog:FinalizeNewAPIData()
     
     -- Get damage data
     local damageData = MPT.DamageMeterCompat:GetDamageData()
+    if damageData and not next(damageData) then
+        damageData = nil
+    end
     if damageData then
         for playerName, stats in pairs(damageData) do
             local shortName = NormalizeUnitName(playerName) or playerName
@@ -163,6 +169,9 @@ function CombatLog:FinalizeNewAPIData()
     
     -- Get healing data
     local healingData = MPT.DamageMeterCompat:GetHealingData()
+    if healingData and not next(healingData) then
+        healingData = nil
+    end
     if healingData then
         for playerName, stats in pairs(healingData) do
             local shortName = NormalizeUnitName(playerName) or playerName
@@ -198,6 +207,9 @@ function CombatLog:FinalizeNewAPIData()
     
     -- Get interrupt data
     local interruptData = MPT.DamageMeterCompat:GetInterruptData()
+    if interruptData and not next(interruptData) then
+        interruptData = nil
+    end
     if interruptData then
         for playerName, stats in pairs(interruptData) do
             local shortName = NormalizeUnitName(playerName) or playerName
@@ -253,7 +265,7 @@ function CombatLog:OnCombatLogEvent(...)
 
     -- Track pet ownership so pet damage/healing is credited to the owner (Details-style)
     if eventType == "SPELL_SUMMON" and sourceName and destGUID then
-        self.petOwnerNameByGUID[destGUID] = sourceName
+        self.petOwnerNameByGUID[destGUID] = NormalizeUnitName(sourceName) or sourceName
         return
     end
 
@@ -263,14 +275,16 @@ function CombatLog:OnCombatLogEvent(...)
         return
     end
 
-    -- WoW 12.0+ uses C_DamageMeter for totals; keep CLEU for deaths/mobs only
-    if self.useNewAPI then
+    -- WoW 12.0+ prefers C_DamageMeter for totals, but keep CLEU as a fallback.
+    if self.useNewAPI and not self.allowCLEUFallback then
         return
     end
 
     -- Credit pet events to owner when possible
     if sourceGUID and self.petOwnerNameByGUID[sourceGUID] then
         sourceName = self.petOwnerNameByGUID[sourceGUID]
+    elseif (not sourceName or sourceName == "") and sourceGUID and self.playerGUIDToName[sourceGUID] then
+        sourceName = self.playerGUIDToName[sourceGUID]
     end
 
     if eventType == "SWING_DAMAGE" then
@@ -295,6 +309,7 @@ function CombatLog:OnUnitDeath(guid, name, flags)
     if not name then
         name = self.playerGUIDToName[guid]
     end
+    name = NormalizeUnitName(name) or name
 
     -- Track player deaths
     local isPlayer = flags and (bit.band(flags, COMBATLOG_OBJECT_TYPE_PLAYER) == COMBATLOG_OBJECT_TYPE_PLAYER)
@@ -327,6 +342,8 @@ end
 
 function CombatLog:OnDamage(sourceName, amount)
     if not sourceName or not amount then return end
+
+    sourceName = NormalizeUnitName(sourceName) or sourceName
     
     if not self.playerStats[sourceName] then
         self.playerStats[sourceName] = {
@@ -345,6 +362,8 @@ end
 
 function CombatLog:OnHealing(sourceName, amount)
     if not sourceName or not amount then return end
+
+    sourceName = NormalizeUnitName(sourceName) or sourceName
     
     if not self.playerStats[sourceName] then
         self.playerStats[sourceName] = {
@@ -363,6 +382,8 @@ end
 
 function CombatLog:OnInterrupt(sourceName)
     if not sourceName then return end
+
+    sourceName = NormalizeUnitName(sourceName) or sourceName
     
     if not self.playerStats[sourceName] then
         self.playerStats[sourceName] = {

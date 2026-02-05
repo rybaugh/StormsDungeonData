@@ -111,27 +111,60 @@ local function GetHeroTalentInfoSafe()
         end
     end
 
-    if configID and subTreeID then
-        local subTreeInfo = GetSubTreeInfoSafe(configID, subTreeID)
-        if type(subTreeInfo) == "table" then
-            return {
-                heroTreeID = subTreeID,
-                heroName = subTreeInfo.name,
-                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID,
-            }
+    if subTreeID and subTreeID ~= 0 then
+        local heroName, heroIcon
+        
+        -- Try with configID first
+        if configID then
+            local subTreeInfo = GetSubTreeInfoSafe(configID, subTreeID)
+            if type(subTreeInfo) == "table" then
+                heroName = subTreeInfo.name
+                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID
+            end
+            
+            if not heroIcon then
+                local treeInfo = GetTreeInfoSafe(configID, subTreeID)
+                if type(treeInfo) == "table" then
+                    heroName = heroName or treeInfo.name
+                    heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID
+                end
+            end
         end
-
-        local treeInfo = GetTreeInfoSafe(configID, subTreeID)
-        if type(treeInfo) == "table" then
-            return {
-                heroTreeID = subTreeID,
-                heroName = treeInfo.name,
-                heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID,
-            }
+        
+        -- Try without configID if we still don't have an icon
+        if not heroIcon then
+            local subTreeInfo = GetSubTreeInfoSafe(nil, subTreeID)
+            if type(subTreeInfo) == "table" then
+                heroName = heroName or subTreeInfo.name
+                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID
+            end
+            
+            if not heroIcon then
+                local treeInfo = GetTreeInfoSafe(nil, subTreeID)
+                if type(treeInfo) == "table" then
+                    heroName = heroName or treeInfo.name
+                    heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID
+                end
+            end
         end
+        
+        -- Try GetHeroTalentSpecInfo as last resort
+        if not heroIcon and type(C_ClassTalents.GetHeroTalentSpecInfo) == "function" then
+            local heroInfo = SafeCall(C_ClassTalents.GetHeroTalentSpecInfo, subTreeID)
+            if type(heroInfo) == "table" then
+                heroName = heroName or heroInfo.name or heroInfo.specName
+                heroIcon = heroInfo.icon or heroInfo.iconFileID or heroInfo.iconID
+            end
+        end
+        
+        return {
+            heroTreeID = subTreeID,
+            heroName = heroName,
+            heroIcon = heroIcon,
+        }
     end
 
-    return subTreeID and { heroTreeID = subTreeID } or nil
+    return nil
 end
 
 -- Helper function to set backdrop compatibility with WoW 12.0+
@@ -228,12 +261,13 @@ function Scoreboard:Create()
     frame.SpecIconText = specIconText
 
     local heroIconFrame = CreateFrame("Frame", nil, frame)
-    heroIconFrame:SetSize(24, 24)
+    heroIconFrame:SetSize(80, 24)
     heroIconFrame:SetPoint("LEFT", keystoneLevel, "RIGHT", 8, 0)
 
     local heroIconText = heroIconFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     heroIconText:SetPoint("CENTER", heroIconFrame, "CENTER", 0, 0)
     heroIconText:SetJustifyH("CENTER")
+    heroIconText:SetTextColor(0.8, 0.8, 1, 1)  -- Light blue tint
     frame.HeroIconText = heroIconText
 
     -- Duration + Mob % - bigger and under dungeon name
@@ -249,9 +283,9 @@ function Scoreboard:Create()
     
     -- Player stats table header
     local headerY = -155
-    local headers = {"Player", "Damage", "Healing", "Interrupts", "Deaths"}
-    local columnWidths = {180, 170, 170, 140, 120}
-    local headerX = 15
+    local headers = {"Player", "Damage", "Healing", "Interrupts"}
+    local columnWidths = {200, 200, 200, 180}
+    local headerX = 10
     
     -- Create header background
     local headerBg = frame:CreateTexture(nil, "BACKGROUND")
@@ -266,7 +300,11 @@ function Scoreboard:Create()
         headerText:SetPoint("TOPLEFT", frame, "TOPLEFT", headerX, headerY)
         headerText:SetTextColor(1, 0.84, 0, 1)
         headerText:SetWidth(columnWidths[i])
-        headerText:SetJustifyH("LEFT")
+        if i == 1 then
+            headerText:SetJustifyH("LEFT")
+        else
+            headerText:SetJustifyH("CENTER")
+        end
         headerX = headerX + columnWidths[i]
     end
     
@@ -319,12 +357,6 @@ function Scoreboard:Create()
         interrupts:SetWidth(columnWidths[4])
         interrupts:SetJustifyH("CENTER")
         
-        local deaths = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        deaths:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3] + columnWidths[4], 0)
-        deaths:SetWidth(columnWidths[5])
-        deaths:SetJustifyH("CENTER")
-        deaths:SetTextColor(0.8, 0.8, 0.8)  -- Grayed out
-        
         table.insert(frame.PlayerRows, {
             frame = row,
             mvpBg = mvpBg,
@@ -332,7 +364,6 @@ function Scoreboard:Create()
             damage = damage,
             healing = healing,
             interrupts = interrupts,
-            deaths = deaths,
         })
     end
 
@@ -349,7 +380,7 @@ function Scoreboard:Create()
 
     local totalsText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     totalsText:SetPoint("TOPLEFT", footerBg, "TOPLEFT", 12, -28)
-    totalsText:SetText("Damage: --   Healing: --   Interrupts: --   Deaths: --")
+    totalsText:SetText("Damage: --   Healing: --   Interrupts: --")
     frame.TotalsText = totalsText
 
     local mvpTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -410,13 +441,13 @@ function Scoreboard:Show(runRecord)
 
     if not runRecord.heroIcon then
         local hero = GetHeroTalentInfoSafe()
-        if hero and hero.heroIcon then
+        if hero and hero.heroIcon and hero.heroIcon ~= 0 then
             runRecord.heroIcon = hero.heroIcon
         end
     end
 
     if frame.SpecIconText then
-        if runRecord.specIcon then
+        if runRecord.specIcon and runRecord.specIcon ~= 0 then
             frame.SpecIconText:SetText("|T" .. tostring(runRecord.specIcon) .. ":16:16:0:0|t")
         else
             frame.SpecIconText:SetText("")
@@ -424,8 +455,8 @@ function Scoreboard:Show(runRecord)
     end
 
     if frame.HeroIconText then
-        if runRecord.heroIcon then
-            frame.HeroIconText:SetText("|T" .. tostring(runRecord.heroIcon) .. ":16:16:0:0|t")
+        if runRecord.heroName and runRecord.heroName ~= "" then
+            frame.HeroIconText:SetText(runRecord.heroName)
         else
             frame.HeroIconText:SetText("")
         end
@@ -492,7 +523,7 @@ function Scoreboard:Show(runRecord)
         return best
     end
 
-    local totalsDamage, totalsHealing, totalsInterrupts, totalsDeaths = 0, 0, 0, 0
+    local totalsDamage, totalsHealing, totalsInterrupts = 0, 0, 0
     local mvpIndex = nil
     local mvpScore = nil
     local mvpStats = nil
@@ -507,26 +538,16 @@ function Scoreboard:Show(runRecord)
         return value / total
     end
 
-    local function GroupDeathBonus(teamDeaths)
-        -- 1.0 when 0 deaths, 0.5 when 1 death, etc.
-        teamDeaths = tonumber(teamDeaths) or 0
-        if teamDeaths < 0 then teamDeaths = 0 end
-        return 1 / (1 + teamDeaths)
-    end
-
-    local function MVPScoreFor(role, dmgShare, healShare, intShare, deaths, teamDeaths)
+    local function MVPScoreFor(role, dmgShare, healShare, intShare)
         role = role or ""
-        deaths = tonumber(deaths) or 0
-
-        local groupBonus = GroupDeathBonus(teamDeaths)
 
         -- Scores are designed to be comparable across roles.
         if role == "HEALER" then
-            return (0.20 * dmgShare) + (1.00 * healShare) + (0.10 * intShare) + (1.00 * groupBonus) - (0.35 * deaths)
+            return (0.20 * dmgShare) + (1.00 * healShare) + (0.10 * intShare)
         elseif role == "TANK" then
-            return (0.70 * dmgShare) + (0.30 * healShare) + (0.80 * intShare) + (0.60 * groupBonus) - (0.35 * deaths)
+            return (0.60 * dmgShare) + (0.40 * healShare) + (0.80 * intShare)
         else -- DAMAGER / unknown
-            return (1.00 * dmgShare) + (0.10 * healShare) + (0.60 * intShare) + (0.15 * groupBonus) - (0.35 * deaths)
+            return (1.00 * dmgShare) + (0.10 * healShare) + (0.60 * intShare)
         end
     end
 
@@ -584,20 +605,15 @@ function Scoreboard:Show(runRecord)
             row.damage:SetText(damageText)
             row.healing:SetText(healingText)
             row.interrupts:SetText(interruptsText)
-            local deathsValue = stats.deaths or 0
-
-            row.deaths:SetText(tostring(deathsValue))
 
             totalsDamage = totalsDamage + (stats.damage or 0)
             totalsHealing = totalsHealing + (stats.healing or 0)
             totalsInterrupts = totalsInterrupts + (stats.interrupts or 0)
-            totalsDeaths = totalsDeaths + deathsValue
 
             mvpCandidates[i] = {
                 player = player,
                 stats = stats,
                 role = player.role or stats.role,
-                deaths = deathsValue,
             }
             
             row.frame:Show()
@@ -611,7 +627,7 @@ function Scoreboard:Show(runRecord)
             local dmgShare = SafeShare(c.stats.damage or 0, totalsDamage)
             local healShare = SafeShare(c.stats.healing or 0, totalsHealing)
             local intShare = SafeShare(c.stats.interrupts or 0, totalsInterrupts)
-            local score = MVPScoreFor(c.role, dmgShare, healShare, intShare, c.deaths, totalsDeaths)
+            local score = MVPScoreFor(c.role, dmgShare, healShare, intShare)
             if (not mvpScore) or score > mvpScore then
                 mvpScore = score
                 mvpIndex = i
@@ -629,11 +645,10 @@ function Scoreboard:Show(runRecord)
     end
 
     frame.TotalsText:SetText(string.format(
-        "Damage: |cffff8000%s|r   Healing: |cff00ff00%s|r   Interrupts: |cff0088ff%d|r   Deaths: %d",
+        "Damage: |cffff8000%s|r   Healing: |cff00ff00%s|r   Interrupts: |cff0088ff%d|r",
         MPT.Utils:FormatNumber(totalsDamage),
         MPT.Utils:FormatNumber(totalsHealing),
-        totalsInterrupts,
-        totalsDeaths
+        totalsInterrupts
     ))
 
     if mvpIndex and frame.PlayerRows[mvpIndex] and frame.PlayerRows[mvpIndex].mvpBg then

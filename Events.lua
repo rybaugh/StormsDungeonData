@@ -17,6 +17,97 @@ local function SafeCall(func, ...)
     return a, b, c, d
 end
 
+local function NormalizeUnitName(name)
+    if type(name) ~= "string" then
+        return nil
+    end
+    local short = name:match("^([^%-]+)%-")
+    return short or name
+end
+
+local function GetDetailsSegmentCount(details)
+    if not details then
+        return 0
+    end
+
+    local count = nil
+
+    local a = SafeCall(details.GetCombatSegments, details)
+    if type(a) == "number" then
+        count = a
+    elseif type(a) == "table" then
+        count = #a
+    end
+
+    if not count then
+        local b = SafeCall(details.GetNumCombatSegments, details)
+        if type(b) == "number" then
+            count = b
+        end
+    end
+
+    if not count then
+        local c = SafeCall(details.GetCombatSegmentsAmount, details)
+        if type(c) == "number" then
+            count = c
+        end
+    end
+
+    if not count and type(details.segments) == "table" then
+        count = #details.segments
+    end
+
+    if not count and type(details.combat_id) == "number" then
+        count = details.combat_id
+    end
+
+    if not count then
+        count = 25
+    end
+
+    if count < 0 then
+        count = 0
+    end
+
+    return count
+end
+
+local function CombatHasAnyTotals(combat)
+    if not combat or type(combat.GetContainer) ~= "function" then
+        return false
+    end
+
+    local damageContainer = combat:GetContainer(_G.DETAILS_ATTRIBUTE_DAMAGE or 1)
+    if damageContainer and type(damageContainer.ListActors) == "function" then
+        for _, actor in damageContainer:ListActors() do
+            if actor and tonumber(actor.total) and actor.total > 0 then
+                return true
+            end
+        end
+    end
+
+    local healContainer = combat:GetContainer(_G.DETAILS_ATTRIBUTE_HEAL or 2)
+    if healContainer and type(healContainer.ListActors) == "function" then
+        for _, actor in healContainer:ListActors() do
+            if actor and tonumber(actor.total) and actor.total > 0 then
+                return true
+            end
+        end
+    end
+
+    local miscContainer = combat:GetContainer(_G.DETAILS_ATTRIBUTE_MISC or 4)
+    if miscContainer and type(miscContainer.ListActors) == "function" then
+        for _, actor in miscContainer:ListActors() do
+            local interrupts = actor and (actor.interrupt or actor.interrupts or actor.interrupt_amount or actor.interrupts_amount)
+            if interrupts and tonumber(interrupts) and tonumber(interrupts) > 0 then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 local function GetPlayerSpecInfoSafe()
     if type(GetSpecialization) ~= "function" or type(GetSpecializationInfo) ~= "function" then
         return nil
@@ -113,27 +204,60 @@ local function GetHeroTalentInfoSafe()
         end
     end
 
-    if configID and subTreeID then
-        local subTreeInfo = GetSubTreeInfoSafe(configID, subTreeID)
-        if type(subTreeInfo) == "table" then
-            return {
-                heroTreeID = subTreeID,
-                heroName = subTreeInfo.name,
-                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID,
-            }
+    if subTreeID and subTreeID ~= 0 then
+        local heroName, heroIcon
+        
+        -- Try with configID first
+        if configID then
+            local subTreeInfo = GetSubTreeInfoSafe(configID, subTreeID)
+            if type(subTreeInfo) == "table" then
+                heroName = subTreeInfo.name
+                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID
+            end
+            
+            if not heroIcon then
+                local treeInfo = GetTreeInfoSafe(configID, subTreeID)
+                if type(treeInfo) == "table" then
+                    heroName = heroName or treeInfo.name
+                    heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID
+                end
+            end
         end
-
-        local treeInfo = GetTreeInfoSafe(configID, subTreeID)
-        if type(treeInfo) == "table" then
-            return {
-                heroTreeID = subTreeID,
-                heroName = treeInfo.name,
-                heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID,
-            }
+        
+        -- Try without configID if we still don't have an icon
+        if not heroIcon then
+            local subTreeInfo = GetSubTreeInfoSafe(nil, subTreeID)
+            if type(subTreeInfo) == "table" then
+                heroName = heroName or subTreeInfo.name
+                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID
+            end
+            
+            if not heroIcon then
+                local treeInfo = GetTreeInfoSafe(nil, subTreeID)
+                if type(treeInfo) == "table" then
+                    heroName = heroName or treeInfo.name
+                    heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID
+                end
+            end
         end
+        
+        -- Try GetHeroTalentSpecInfo as last resort
+        if not heroIcon and type(C_ClassTalents.GetHeroTalentSpecInfo) == "function" then
+            local heroInfo = SafeCall(C_ClassTalents.GetHeroTalentSpecInfo, subTreeID)
+            if type(heroInfo) == "table" then
+                heroName = heroName or heroInfo.name or heroInfo.specName
+                heroIcon = heroInfo.icon or heroInfo.iconFileID or heroInfo.iconID
+            end
+        end
+        
+        return {
+            heroTreeID = subTreeID,
+            heroName = heroName,
+            heroIcon = heroIcon,
+        }
     end
 
-    return subTreeID and { heroTreeID = subTreeID } or nil
+    return nil
 end
 
 local function GetDungeonNameFromMapID(mapID)
@@ -161,6 +285,202 @@ local function NormalizeDurationSeconds(duration)
         return math.floor(duration / 1000)
     end
     return math.floor(duration)
+end
+
+local function GetEnemyForcesProgress()
+    if not C_Scenario or not C_ScenarioInfo then
+        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: C_Scenario or C_ScenarioInfo not available")
+        return nil
+    end
+    if type(C_Scenario.GetStepInfo) ~= "function" or type(C_ScenarioInfo.GetCriteriaInfo) ~= "function" then
+        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: Required API functions not available")
+        return nil
+    end
+
+    local _, _, steps = C_Scenario.GetStepInfo()
+    if not steps or steps <= 0 then
+        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: No scenario steps found")
+        return nil
+    end
+    print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: Found " .. steps .. " scenario steps")
+
+    local criteria = C_ScenarioInfo.GetCriteriaInfo(steps)
+    if type(criteria) ~= "table" then
+        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: No criteria info available")
+        return nil
+    end
+
+    local total = tonumber(criteria.totalQuantity) or 0
+    local current = type(criteria.quantity) == "number" and criteria.quantity or nil
+    local quantityString = criteria.quantityString
+    
+    print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: totalQuantity=" .. tostring(criteria.totalQuantity) .. ", quantity=" .. tostring(criteria.quantity) .. ", quantityString='" .. tostring(quantityString) .. "'")
+
+    if (not current or current <= 0) and type(quantityString) == "string" then
+        local a, b = quantityString:match("([%d%.]+)%s*/%s*([%d%.]+)")
+        if a then
+            current = tonumber(a)
+            if total <= 0 and b then
+                total = tonumber(b) or total
+            end
+        else
+            local n = quantityString:match("([%d%.]+)")
+            if n then
+                current = tonumber(n)
+            end
+        end
+    end
+
+    local percent
+    if current and total and total > 0 then
+        percent = (current / total) * 100
+    elseif current and type(quantityString) == "string" and quantityString:find("%%") then
+        percent = current
+    end
+
+    if percent and percent > 100 then
+        percent = 100
+    end
+
+    if not current and not total and not percent then
+        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: No valid data found (current=nil, total=0, percent=nil)")
+        return nil
+    end
+
+    print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: Returning current=" .. tostring(current or 0) .. ", total=" .. tostring(total or 0) .. ", percent=" .. tostring(percent))
+    return {
+        current = current or 0,
+        total = total or 0,
+        percent = percent,
+    }
+end
+
+local function GetDetailsMythicDungeonOverallCombat()
+    local details = _G.Details
+    if not details or type(details.GetCombat) ~= "function" then
+        return nil
+    end
+
+    if type(details.GetMythicDungeonOverallCombat) == "function" then
+        local combat = details:GetMythicDungeonOverallCombat()
+        if combat then
+            return combat
+        end
+    end
+
+    local overallId = _G.DETAILS_SEGMENTID_OVERALL or -1
+    local overallCombat = details:GetCombat(overallId)
+    local overallType = _G.DETAILS_SEGMENTTYPE_MYTHICDUNGEON_OVERALL or 12
+    if overallCombat then
+        if overallCombat.IsMythicDungeonOverall and overallCombat:IsMythicDungeonOverall() then
+            return overallCombat
+        end
+        if overallCombat.GetCombatType and overallCombat:GetCombatType() == overallType then
+            return overallCombat
+        end
+    end
+
+    local bestCombat
+    local bestEndTime
+    local segmentCount = GetDetailsSegmentCount(details)
+    if segmentCount <= 0 then
+        segmentCount = 25
+    end
+    for i = 1, segmentCount do
+        local combat = details:GetCombat(i)
+        if combat then
+            local isOverall = (combat.IsMythicDungeonOverall and combat:IsMythicDungeonOverall())
+                or (combat.GetCombatType and combat:GetCombatType() == overallType)
+
+            if isOverall then
+                local endTime
+                if combat.GetDate then
+                    local _, e = combat:GetDate()
+                    endTime = e
+                end
+                if endTime and (not bestEndTime or endTime > bestEndTime) then
+                    bestEndTime = endTime
+                    bestCombat = combat
+                elseif not bestCombat then
+                    bestCombat = combat
+                end
+            end
+        end
+    end
+
+    if bestCombat then
+        return bestCombat
+    end
+
+    if overallCombat and CombatHasAnyTotals(overallCombat) then
+        return overallCombat
+    end
+
+    if details.tabela_overall and CombatHasAnyTotals(details.tabela_overall) then
+        return details.tabela_overall
+    end
+
+    return nil
+end
+
+local function GetDetailsOverallPlayerStats()
+    local combat = GetDetailsMythicDungeonOverallCombat()
+    if not combat or type(combat.GetContainer) ~= "function" then
+        return nil
+    end
+
+    local statsByName = {}
+
+    local function Ensure(name)
+        local key = NormalizeUnitName(name) or name
+        if not key then
+            return nil
+        end
+        if not statsByName[key] then
+            statsByName[key] = { damage = 0, healing = 0, interrupts = 0 }
+        end
+        return statsByName[key]
+    end
+
+    local function ExtractName(actor)
+        return actor and (actor.name or actor.nome or actor.Name)
+    end
+
+    local damageContainer = combat:GetContainer(_G.DETAILS_ATTRIBUTE_DAMAGE or 1)
+    if damageContainer and type(damageContainer.ListActors) == "function" then
+        for _, actor in damageContainer:ListActors() do
+            local name = ExtractName(actor)
+            local entry = Ensure(name)
+            if entry then
+                entry.damage = tonumber(actor.total) or 0
+            end
+        end
+    end
+
+    local healContainer = combat:GetContainer(_G.DETAILS_ATTRIBUTE_HEAL or 2)
+    if healContainer and type(healContainer.ListActors) == "function" then
+        for _, actor in healContainer:ListActors() do
+            local name = ExtractName(actor)
+            local entry = Ensure(name)
+            if entry then
+                entry.healing = tonumber(actor.total) or 0
+            end
+        end
+    end
+
+    local miscContainer = combat:GetContainer(_G.DETAILS_ATTRIBUTE_MISC or 4)
+    if miscContainer and type(miscContainer.ListActors) == "function" then
+        for _, actor in miscContainer:ListActors() do
+            local name = ExtractName(actor)
+            local entry = Ensure(name)
+            if entry then
+                local interrupts = actor.interrupt or actor.interrupts or actor.interrupt_amount or actor.interrupts_amount
+                entry.interrupts = tonumber(interrupts) or entry.interrupts or 0
+            end
+        end
+    end
+
+    return next(statsByName) and statsByName or nil
 end
 
 local function GetCompletionInfoCompat()
@@ -344,6 +664,7 @@ function Events:OnPlayerEnteringWorld()
     else
         -- If we just exited a completed key and it wasn't saved, force-save it.
         if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+            print("|cff00ffaa[StormsDungeonData]|r Player teleported out of dungeon, auto-saving run (exit)")
             self:FinalizeRun("exit")
         end
         MPT.CombatLog:StopTracking()
@@ -351,8 +672,11 @@ function Events:OnPlayerEnteringWorld()
 end
 
 function Events:OnChallengeModeCompleted()
+    print("|cff00ffaa[StormsDungeonData]|r CHALLENGE_MODE_COMPLETED event fired")
+    
     -- Avoid re-creating run data if we already cached it and it isn't saved yet.
     if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+        print("|cff00ffaa[StormsDungeonData]|r Run already cached, waiting for save")
         return
     end
 
@@ -423,34 +747,42 @@ function Events:OnChallengeModeCompleted()
         if C_Timer and C_Timer.After then
             C_Timer.After(8, function()
                 if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+                    print("|cff00ffaa[StormsDungeonData]|r 8-second fallback timer triggered, auto-saving run (completed)")
                     Events:FinalizeRun("completed")
                 end
             end)
             -- Secondary safety net.
             C_Timer.After(45, function()
                 if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+                    print("|cff00ffaa[StormsDungeonData]|r 45-second fallback timer triggered, auto-saving run (timeout)")
                     Events:FinalizeRun("timeout")
                 end
             end)
         end
     else
         -- Some clients return completion info slightly later. Retry a few times.
+        print("|cff00ffaa[StormsDungeonData]|r Warning: could not read completion info (mapID=" .. tostring(mapID) .. ", level=" .. tostring(level) .. ")")
         if C_Timer and C_Timer.After then
             self.challengeRetryCount = (self.challengeRetryCount or 0) + 1
             if self.challengeRetryCount <= 5 then
                 local delay = 1.5 * self.challengeRetryCount
+                print("|cff00ffaa[StormsDungeonData]|r Retrying in " .. delay .. " seconds (attempt " .. self.challengeRetryCount .. "/5)")
                 C_Timer.After(delay, function()
                     Events:OnChallengeModeCompleted()
                 end)
                 return
+            else
+                print("|cff00ffaa[StormsDungeonData]|r Failed to get completion info after 5 retries")
             end
         end
-        print("|cff00ffaa[StormsDungeonData]|r Warning: could not read completion info (missing mapID/level)")
     end
 end
 
 function Events:FinalizeRun(reason)
+    print("|cff00ffaa[StormsDungeonData]|r FinalizeRun called (reason: " .. tostring(reason) .. ")")
+    
     if not MPT.CurrentRunData then
+        print("|cff00ffaa[StormsDungeonData]|r No current run data, attempting to build from keystone")
         if not self:BuildRunDataFromActiveKeystone() then
             print("|cff00ffaa[StormsDungeonData]|r No pending run data to save")
             return false
@@ -458,6 +790,7 @@ function Events:FinalizeRun(reason)
     end
 
     if MPT.CurrentRunData.saved then
+        print("|cff00ffaa[StormsDungeonData]|r Run already saved, skipping")
         return false
     end
 
@@ -481,18 +814,39 @@ function Events:FinalizeRun(reason)
     end
     MPT.CurrentRunData.duration = duration
 
-    -- Get mob percentage from combat log
+    -- Get mob percentage from combat log if available; otherwise fall back to scenario criteria (MPlusTimer-style).
     if MPT.CombatLog.mobsKilled and MPT.CombatLog.mobsTotal > 0 then
         MPT.CurrentRunData.mobsKilled = MPT.CombatLog.mobsKilled
         MPT.CurrentRunData.mobsTotal = MPT.CombatLog.mobsTotal
         MPT.CurrentRunData.overallMobPercentage = (MPT.CombatLog.mobsKilled / MPT.CombatLog.mobsTotal) * 100
+        print("|cff00ffaa[StormsDungeonData]|r Mob % from CombatLog: " .. string.format("%.1f%%", MPT.CurrentRunData.overallMobPercentage) .. " (" .. MPT.CombatLog.mobsKilled .. "/" .. MPT.CombatLog.mobsTotal .. ")")
+    else
+        print("|cff00ffaa[StormsDungeonData]|r CombatLog mob data not available (mobsKilled=" .. tostring(MPT.CombatLog and MPT.CombatLog.mobsKilled) .. ", mobsTotal=" .. tostring(MPT.CombatLog and MPT.CombatLog.mobsTotal) .. "), trying Scenario API...")
+        local forces = GetEnemyForcesProgress()
+        if forces then
+            MPT.CurrentRunData.mobsKilled = forces.current or 0
+            MPT.CurrentRunData.mobsTotal = forces.total or 0
+            if forces.percent then
+                MPT.CurrentRunData.overallMobPercentage = forces.percent
+                print("|cff00ffaa[StormsDungeonData]|r Mob % from Scenario API (percent): " .. string.format("%.1f%%", forces.percent))
+            elseif forces.total > 0 then
+                MPT.CurrentRunData.overallMobPercentage = (forces.current / forces.total) * 100
+                print("|cff00ffaa[StormsDungeonData]|r Mob % from Scenario API (calculated): " .. string.format("%.1f%%", MPT.CurrentRunData.overallMobPercentage) .. " (" .. forces.current .. "/" .. forces.total .. ")")
+            end
+        else
+            print("|cff00ffaa[StormsDungeonData]|r Warning: Could not get mob percentage (no data from CombatLog or Scenario API)")
+        end
     end
 
     -- Copy tracked stats into player records (so UI and saved history match Details totals)
     local sumBase = 0
+    local detailsStats = GetDetailsOverallPlayerStats()
     if MPT.CurrentRunData.players then
         for _, p in ipairs(MPT.CurrentRunData.players) do
-            local stats = (MPT.CombatLog and MPT.CombatLog:GetPlayerStats(p.name)) or {}
+            local key = NormalizeUnitName(p.name) or p.name
+            local stats = (detailsStats and key and detailsStats[key])
+                or (MPT.CombatLog and MPT.CombatLog:GetPlayerStats(p.name))
+                or {}
             p.damage = stats.damage or 0
             p.healing = stats.healing or 0
             p.interrupts = stats.interrupts or 0
@@ -586,6 +940,7 @@ function Events:OnLootOpened()
     local numLootItems = GetNumLootItems()
     
     if numLootItems > 0 and not MPT.CurrentRunData then
+        print("|cff00ffaa[StormsDungeonData]|r Loot opened but no current run, attempting to build from keystone")
         self:BuildRunDataFromActiveKeystone()
     end
 
@@ -607,6 +962,7 @@ function Events:OnLootOpened()
         end
 
         if withinWindow and hasAnyItem and (looksLikeReward or true) then
+            print("|cff00ffaa[StormsDungeonData]|r Loot chest detected, auto-saving run (loot)")
             self:FinalizeRun("loot")
         end
     elseif numLootItems > 0 and MPT.LastSavedRun and not MPT.LastSavedRunShown then

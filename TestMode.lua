@@ -112,27 +112,60 @@ local function GetHeroTalentInfoSafe()
         end
     end
 
-    if configID and subTreeID then
-        local subTreeInfo = GetSubTreeInfoSafe(configID, subTreeID)
-        if type(subTreeInfo) == "table" then
-            return {
-                heroTreeID = subTreeID,
-                heroName = subTreeInfo.name,
-                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID,
-            }
+    if subTreeID and subTreeID ~= 0 then
+        local heroName, heroIcon
+        
+        -- Try with configID first
+        if configID then
+            local subTreeInfo = GetSubTreeInfoSafe(configID, subTreeID)
+            if type(subTreeInfo) == "table" then
+                heroName = subTreeInfo.name
+                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID
+            end
+            
+            if not heroIcon then
+                local treeInfo = GetTreeInfoSafe(configID, subTreeID)
+                if type(treeInfo) == "table" then
+                    heroName = heroName or treeInfo.name
+                    heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID
+                end
+            end
         end
-
-        local treeInfo = GetTreeInfoSafe(configID, subTreeID)
-        if type(treeInfo) == "table" then
-            return {
-                heroTreeID = subTreeID,
-                heroName = treeInfo.name,
-                heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID,
-            }
+        
+        -- Try without configID if we still don't have an icon
+        if not heroIcon then
+            local subTreeInfo = GetSubTreeInfoSafe(nil, subTreeID)
+            if type(subTreeInfo) == "table" then
+                heroName = heroName or subTreeInfo.name
+                heroIcon = subTreeInfo.icon or subTreeInfo.iconFileID or subTreeInfo.iconID
+            end
+            
+            if not heroIcon then
+                local treeInfo = GetTreeInfoSafe(nil, subTreeID)
+                if type(treeInfo) == "table" then
+                    heroName = heroName or treeInfo.name
+                    heroIcon = treeInfo.icon or treeInfo.iconFileID or treeInfo.iconID
+                end
+            end
         end
+        
+        -- Try GetHeroTalentSpecInfo as last resort
+        if not heroIcon and type(C_ClassTalents.GetHeroTalentSpecInfo) == "function" then
+            local heroInfo = SafeCall(C_ClassTalents.GetHeroTalentSpecInfo, subTreeID)
+            if type(heroInfo) == "table" then
+                heroName = heroName or heroInfo.name or heroInfo.specName
+                heroIcon = heroInfo.icon or heroInfo.iconFileID or heroInfo.iconID
+            end
+        end
+        
+        return {
+            heroTreeID = subTreeID,
+            heroName = heroName,
+            heroIcon = heroIcon,
+        }
     end
 
-    return subTreeID and { heroTreeID = subTreeID } or nil
+    return nil
 end
 
 -- Test data presets - realistic player stats

@@ -176,25 +176,6 @@ local function HandleSlashCommand(msg, editbox)
         else
             print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
         end
-    elseif cmd == "test" then
-        MPT.TestMode:SimulateDungeonRun()
-    elseif cmd == "chest" or cmd == "loot" then
-        if MPT.Events and MPT.Events.SimulateLootOpened then
-            MPT.Events:SimulateLootOpened()
-        else
-            print("|cff00ffaa[StormsDungeonData]|r Events module not ready.")
-        end
-    elseif cmd == "testdata" then
-        local n = tonumber(rest) or 15
-        n = math.floor(n)
-        if n < 1 then n = 1 end
-        if n > 200 then n = 200 end
-
-        if MPT.TestMode and MPT.TestMode.SeedHistory then
-            MPT.TestMode:SeedHistory(n)
-        else
-            print("|cff00ffaa[StormsDungeonData]|r TestMode seeding not available")
-        end
     elseif cmd == "reset" then
         StormsDungeonDataDB = MPT.Database:CreateDefaultDB()
         print("|cff00ffaa[StormsDungeonData]|r Database reset!")
@@ -207,9 +188,6 @@ local function HandleSlashCommand(msg, editbox)
         print("  |cff00ffaa/sdd history|r - Show run history")
         print("  |cff00ffaa/sdd save|r - Manually save pending run")
         print("  |cff00ffaa/sdd status|r - Show addon status")
-        print("  |cff00ffaa/sdd test|r - Simulate dungeon completion (testing)")
-        print("  |cff00ffaa/sdd chest|r - Simulate loot chest finalize (testing)")
-        print("  |cff00ffaa/sdd testdata [n]|r - Generate n fake runs (default 15)")
         print("  |cff00ffaa/sdd reset|r - Reset database")
         print("  |cff00ffaa/sdd help|r - Show this message")
     else

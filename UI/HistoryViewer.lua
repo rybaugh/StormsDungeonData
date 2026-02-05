@@ -16,56 +16,6 @@ local function SafeCall(func, ...)
     return a, b, c, d
 end
 
-local function ResolveHeroIconFromTreeID(heroTreeID)
-    if not heroTreeID then
-        return nil
-    end
-
-    local configID
-    if C_ClassTalents and type(C_ClassTalents.GetActiveConfigID) == "function" then
-        configID = SafeCall(C_ClassTalents.GetActiveConfigID)
-    end
-    if not configID and C_Traits and type(C_Traits.GetActiveConfigID) == "function" then
-        configID = SafeCall(C_Traits.GetActiveConfigID)
-    end
-
-    local info
-    if C_Traits and type(C_Traits.GetSubTreeInfo) == "function" then
-        info = SafeCall(C_Traits.GetSubTreeInfo, configID, heroTreeID)
-        if not info then
-            info = SafeCall(C_Traits.GetSubTreeInfo, heroTreeID)
-        end
-    end
-    if type(info) == "table" then
-        local icon = info.icon or info.iconFileID or info.iconID
-        if icon then
-            return icon
-        end
-    end
-
-    if C_Traits and type(C_Traits.GetTreeInfo) == "function" then
-        info = SafeCall(C_Traits.GetTreeInfo, configID, heroTreeID)
-        if not info then
-            info = SafeCall(C_Traits.GetTreeInfo, heroTreeID)
-        end
-    end
-    if type(info) == "table" then
-        local icon = info.icon or info.iconFileID or info.iconID
-        if icon then
-            return icon
-        end
-    end
-
-    if C_ClassTalents and type(C_ClassTalents.GetHeroTalentSpecInfo) == "function" then
-        info = SafeCall(C_ClassTalents.GetHeroTalentSpecInfo, heroTreeID)
-        if type(info) == "table" then
-            return info.icon or info.iconFileID or info.iconID
-        end
-    end
-
-    return nil
-end
-
 -- Helper function to set backdrop compatibility with WoW 12.0+
 local function SetBackdropCompat(frame, backdropInfo, backdropColor, backdropBorderColor)
     if frame.SetBackdrop then
@@ -916,19 +866,11 @@ function HistoryViewer:UpdateDisplay()
         heroText:SetPoint("LEFT", runRow, "LEFT", x, 0)
         heroText:SetWidth(80)
         heroText:SetJustifyH("CENTER")
-        do
-            local label = ""
-            local heroIcon = run.heroIcon
-            if not heroIcon and run.heroTreeID then
-                heroIcon = ResolveHeroIconFromTreeID(run.heroTreeID)
-                if heroIcon then
-                    run.heroIcon = heroIcon
-                end
-            end
-            if heroIcon then
-                label = "|T" .. tostring(heroIcon) .. ":14:14:0:0|t"
-            end
-            heroText:SetText(label)
+        heroText:SetTextColor(0.8, 0.8, 1, 1)  -- Light blue tint
+        if run.heroName and run.heroName ~= "" then
+            heroText:SetText(run.heroName)
+        else
+            heroText:SetText("")
         end
         x = x + 80
 

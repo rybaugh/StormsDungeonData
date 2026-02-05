@@ -195,26 +195,34 @@ function DamageMeterCompat:GetDamageData()
         return nil
     end
 
-    if not self:EnsureSessionID() then
-        return nil
-    end
-    if type(self.CurrentSessionID) ~= "number" then
-        return nil
-    end
-    
     local damageData = {}
-    
+
     -- Check for restrictions before proceeding
     if self:IsRestricted(Enum.AddOnRestrictionType.Combat) then
         print("|cff00ffaa[StormsDungeonData]|r Warning: Combat data restricted by Blizzard")
         return nil
     end
-    
-    -- Get damage done session
-    local damageDoneSession = C_DamageMeter.GetCombatSessionFromID(
-        self.CurrentSessionID,
-        Enum.DamageMeterType.DamageDone
-    )
+
+    local damageDoneSession
+    if C_DamageMeter and C_DamageMeter.GetCombatSessionFromType and Enum and Enum.DamageMeterSessionType then
+        damageDoneSession = C_DamageMeter.GetCombatSessionFromType(
+            Enum.DamageMeterSessionType.Overall,
+            Enum.DamageMeterType.DamageDone
+        )
+    end
+
+    if (not damageDoneSession or not damageDoneSession.combatSources) then
+        if not self:EnsureSessionID() then
+            return nil
+        end
+        if type(self.CurrentSessionID) ~= "number" then
+            return nil
+        end
+        damageDoneSession = C_DamageMeter.GetCombatSessionFromID(
+            self.CurrentSessionID,
+            Enum.DamageMeterType.DamageDone
+        )
+    end
     
     if damageDoneSession and damageDoneSession.combatSources then
         for _, source in ipairs(damageDoneSession.combatSources) do
@@ -238,25 +246,33 @@ function DamageMeterCompat:GetHealingData()
         return nil
     end
 
-    if not self:EnsureSessionID() then
-        return nil
-    end
-    if type(self.CurrentSessionID) ~= "number" then
-        return nil
-    end
-    
     local healingData = {}
-    
+
     -- Check for restrictions
     if self:IsRestricted(Enum.AddOnRestrictionType.Combat) then
         return nil
     end
-    
-    -- Get healing done session
-    local healingDoneSession = C_DamageMeter.GetCombatSessionFromID(
-        self.CurrentSessionID,
-        Enum.DamageMeterType.HealingDone
-    )
+
+    local healingDoneSession
+    if C_DamageMeter and C_DamageMeter.GetCombatSessionFromType and Enum and Enum.DamageMeterSessionType then
+        healingDoneSession = C_DamageMeter.GetCombatSessionFromType(
+            Enum.DamageMeterSessionType.Overall,
+            Enum.DamageMeterType.HealingDone
+        )
+    end
+
+    if (not healingDoneSession or not healingDoneSession.combatSources) then
+        if not self:EnsureSessionID() then
+            return nil
+        end
+        if type(self.CurrentSessionID) ~= "number" then
+            return nil
+        end
+        healingDoneSession = C_DamageMeter.GetCombatSessionFromID(
+            self.CurrentSessionID,
+            Enum.DamageMeterType.HealingDone
+        )
+    end
     
     if healingDoneSession and healingDoneSession.combatSources then
         for _, source in ipairs(healingDoneSession.combatSources) do
@@ -280,25 +296,33 @@ function DamageMeterCompat:GetInterruptData()
         return nil
     end
 
-    if not self:EnsureSessionID() then
-        return nil
-    end
-    if type(self.CurrentSessionID) ~= "number" then
-        return nil
-    end
-    
     local interruptData = {}
-    
+
     -- Check for restrictions
     if self:IsRestricted(Enum.AddOnRestrictionType.Combat) then
         return nil
     end
-    
-    -- Get interrupts session
-    local interruptsSession = C_DamageMeter.GetCombatSessionFromID(
-        self.CurrentSessionID,
-        Enum.DamageMeterType.Interrupts
-    )
+
+    local interruptsSession
+    if C_DamageMeter and C_DamageMeter.GetCombatSessionFromType and Enum and Enum.DamageMeterSessionType then
+        interruptsSession = C_DamageMeter.GetCombatSessionFromType(
+            Enum.DamageMeterSessionType.Overall,
+            Enum.DamageMeterType.Interrupts
+        )
+    end
+
+    if (not interruptsSession or not interruptsSession.combatSources) then
+        if not self:EnsureSessionID() then
+            return nil
+        end
+        if type(self.CurrentSessionID) ~= "number" then
+            return nil
+        end
+        interruptsSession = C_DamageMeter.GetCombatSessionFromID(
+            self.CurrentSessionID,
+            Enum.DamageMeterType.Interrupts
+        )
+    end
     
     if interruptsSession and interruptsSession.combatSources then
         for _, source in ipairs(interruptsSession.combatSources) do
