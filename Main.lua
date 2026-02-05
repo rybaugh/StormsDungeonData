@@ -97,6 +97,28 @@ local function CreateBasicMinimapButton(onClick)
     return btn
 end
 
+local function IsPlayerInCorrectDungeon()
+    if not MPT.CurrentRunData or not MPT.CurrentRunData.dungeonID then
+        return false
+    end
+    
+    local _, instanceType, difficultyID = GetInstanceInfo()
+    -- Must be in a Mythic+ dungeon (difficultyID 8 is Mythic Keystone)
+    if instanceType ~= "party" or difficultyID ~= 8 then
+        return false
+    end
+    
+    -- Check if current challenge mode matches the pending run
+    if C_ChallengeMode and type(C_ChallengeMode.GetActiveChallengeMapID) == "function" then
+        local currentMapID = C_ChallengeMode.GetActiveChallengeMapID()
+        if currentMapID and currentMapID == MPT.CurrentRunData.dungeonID then
+            return true
+        end
+    end
+    
+    return false
+end
+
 function MPT.UI:Initialize()
     -- Modules are loaded via the .toc file in order; don't overwrite them here.
     -- Just ensure tables exist so later calls don't hard error.
@@ -105,11 +127,18 @@ function MPT.UI:Initialize()
     
     local function OnMinimapClick(_, button)
         if button == "RightButton" then
+            if not IsPlayerInCorrectDungeon() then
+                print("|cff00ffaa[StormsDungeonData]|r Manual save only allowed inside the dungeon you just completed")
+                return
+            end
             local saved = false
             if MPT.Events and MPT.Events.FinalizeRun then
                 saved = MPT.Events:FinalizeRun("manual") or false
             end
-            if not saved then
+            if saved then
+                -- Scoreboard is shown by FinalizeRun when autoShow is enabled
+                -- If disabled, we could show it here explicitly with MPT.UI:ShowScoreboard(MPT.LastSavedRun)
+            else
                 print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
             end
         else
@@ -167,11 +196,17 @@ local function HandleSlashCommand(msg, editbox)
     if cmd == "history" or cmd == "h" then
         MPT.HistoryViewer:Show()
     elseif cmd == "save" then
+        if not IsPlayerInCorrectDungeon() then
+            print("|cff00ffaa[StormsDungeonData]|r Manual save only allowed inside the dungeon you just completed")
+            return
+        end
         local saved = false
         if MPT.Events and MPT.Events.FinalizeRun then
             saved = MPT.Events:FinalizeRun("manual") or false
         end
         if saved then
+            -- Scoreboard is shown by FinalizeRun when autoShow is enabled
+            -- If disabled, we could show it here explicitly with MPT.UI:ShowScoreboard(MPT.LastSavedRun)
             print("|cff00ffaa[StormsDungeonData]|r Run saved manually!")
         else
             print("|cff00ffaa[StormsDungeonData]|r No pending run to save")

@@ -287,6 +287,8 @@ local function NormalizeDurationSeconds(duration)
     return math.floor(duration)
 end
 
+-- Based on RaiderIO's implementation for accurate enemy forces tracking
+-- Handles both quantityString and quantity/totalQuantity formats
 local function GetEnemyForcesProgress()
     if not C_Scenario or not C_ScenarioInfo then
         print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: C_Scenario or C_ScenarioInfo not available")
@@ -297,54 +299,83 @@ local function GetEnemyForcesProgress()
         return nil
     end
 
-    local _, _, steps = C_Scenario.GetStepInfo()
-    if not steps or steps <= 0 then
-        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: No scenario steps found")
+    local _, _, numCriteria = C_Scenario.GetStepInfo()
+    if not numCriteria or numCriteria <= 1 then
+        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: No scenario criteria found (numCriteria=" .. tostring(numCriteria) .. ")")
         return nil
     end
-    print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: Found " .. steps .. " scenario steps")
+    
+    print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: Found " .. numCriteria .. " scenario criteria")
 
-    local criteria = C_ScenarioInfo.GetCriteriaInfo(steps)
-    if type(criteria) ~= "table" then
+    -- The last criteria is always the enemy forces (trash)
+    local criteriaInfo = C_ScenarioInfo.GetCriteriaInfo(numCriteria)
+    if type(criteriaInfo) ~= "table" then
         print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: No criteria info available")
         return nil
     end
 
-    local total = tonumber(criteria.totalQuantity) or 0
-    local current = type(criteria.quantity) == "number" and criteria.quantity or nil
-    local quantityString = criteria.quantityString
+    -- RaiderIO method: Try quantityString first (e.g., "95%"), then fall back to quantity*totalQuantity/100
+    local quantityString = criteriaInfo.quantityString
+    local quantity = criteriaInfo.quantity
+    local totalQuantity = criteriaInfo.totalQuantity
     
-    print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: totalQuantity=" .. tostring(criteria.totalQuantity) .. ", quantity=" .. tostring(criteria.quantity) .. ", quantityString='" .. tostring(quantityString) .. "'")
+    local current, total, percent
+    
+    print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: quantityString='" .. tostring(quantityString) .. "', quantity=" .. tostring(quantity) .. ", totalQuantity=" .. tostring(totalQuantity))
 
-    if (not current or current <= 0) and type(quantityString) == "string" then
-        local a, b = quantityString:match("([%d%.]+)%s*/%s*([%d%.]+)")
-        if a then
-            current = tonumber(a)
-            if total <= 0 and b then
-                total = tonumber(b) or total
-            end
+    -- Method 1: Parse quantityString if available (e.g., "95%" -> 95)
+    if quantityString and type(quantityString) == "string" then
+        -- Try to extract percentage (remove % sign)
+        local percentMatch = quantityString:match("([%d%.]+)%%")
+        if percentMatch then
+            percent = tonumber(percentMatch)
+            print("|cff00ffaa[SDD]|r Parsed percent from quantityString: " .. tostring(percent) .. "%")
         else
-            local n = quantityString:match("([%d%.]+)")
-            if n then
-                current = tonumber(n)
+            -- Try to extract "current/total" format
+            local a, b = quantityString:match("([%d%.]+)%s*/%s*([%d%.]+)")
+            if a and b then
+                current = tonumber(a)
+                total = tonumber(b)
+                if current and total and total > 0 then
+                    percent = (current / total) * 100
+                end
+                print("|cff00ffaa[SDD]|r Parsed from quantityString: " .. tostring(current) .. "/" .. tostring(total))
             end
         end
     end
-
-    local percent
-    if current and total and total > 0 then
-        percent = (current / total) * 100
-    elseif current and type(quantityString) == "string" and quantityString:find("%%") then
-        percent = current
+    
+    -- Method 2: Calculate from quantity and totalQuantity (RaiderIO formula)
+    if not percent and quantity and totalQuantity and totalQuantity > 0 then
+        -- RaiderIO uses: trash = quantity*totalQuantity/100
+        -- This suggests quantity is a percentage (0-100) and totalQuantity is the actual count
+        current = (quantity * totalQuantity) / 100
+        total = totalQuantity
+        percent = quantity -- quantity is already the percentage
+        print("|cff00ffaa[SDD]|r Calculated using RaiderIO method: current=" .. tostring(current) .. ", total=" .. tostring(total) .. ", percent=" .. tostring(percent) .. "%")
     end
 
-    if percent and percent > 100 then
-        percent = 100
+    -- Ensure percent is within bounds
+    if percent then
+        if percent > 100 then
+            percent = 100
+        elseif percent < 0 then
+            percent = 0
+        end
     end
 
     if not current and not total and not percent then
-        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: No valid data found (current=nil, total=0, percent=nil)")
+        print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: No valid data found")
         return nil
+    end
+
+    -- Calculate missing values if we have percent and total
+    if percent and total and not current then
+        current = (percent * total) / 100
+    end
+    
+    -- Calculate missing values if we have current and total
+    if current and total and not percent and total > 0 then
+        percent = (current / total) * 100
     end
 
     print("|cff00ffaa[SDD]|r GetEnemyForcesProgress: Returning current=" .. tostring(current or 0) .. ", total=" .. tostring(total or 0) .. ", percent=" .. tostring(percent))
@@ -483,7 +514,10 @@ local function GetDetailsOverallPlayerStats()
     return next(statsByName) and statsByName or nil
 end
 
+-- Based on Details! implementation - comprehensive completion info extraction
+-- Supports both new (GetChallengeCompletionInfo) and legacy APIs
 local function GetCompletionInfoCompat()
+    -- Try the modern API first (Details! method)
     if C_ChallengeMode and type(C_ChallengeMode.GetChallengeCompletionInfo) == "function" then
         local info = C_ChallengeMode.GetChallengeCompletionInfo()
         if type(info) == "table" then
@@ -492,10 +526,19 @@ local function GetCompletionInfoCompat()
                 level = info.level or info.keystoneLevel,
                 time = info.time or info.completionTime or info.duration,
                 keystoneUpgrades = info.keystoneUpgradeLevels or info.keystoneUpgrades or info.upgrades,
+                onTime = info.onTime,
+                practiceRun = info.practiceRun,
+                isAffixRecord = info.isAffixRecord,
+                isMapRecord = info.isMapRecord,
+                isEligibleForScore = info.isEligibleForScore,
+                oldOverallDungeonScore = info.oldOverallDungeonScore,
+                newOverallDungeonScore = info.newOverallDungeonScore,
+                members = info.members,
             }
         end
     end
 
+    -- Fallback to legacy API
     if C_ChallengeMode and type(C_ChallengeMode.GetCompletionInfo) == "function" then
         local a, b, c, d = C_ChallengeMode.GetCompletionInfo()
         if type(a) == "table" then
@@ -544,6 +587,26 @@ function Events:BuildRunDataFromActiveKeystone()
     local completionTime = completion and completion.time or nil
     local completionKeystoneUpgrades = completion and completion.keystoneUpgrades or nil
 
+    -- Try to get accurate duration from Details combat tracker first
+    local detailsDuration = nil
+    local combat = GetDetailsMythicDungeonOverallCombat()
+    if combat then
+        -- Details tracks combat time in seconds
+        if combat.GetCombatTime and type(combat.GetCombatTime) == "function" then
+            detailsDuration = combat:GetCombatTime()
+            print("|cff00ffaa[StormsDungeonData]|r Details combat time: " .. tostring(detailsDuration))
+        elseif combat.combat_time then
+            detailsDuration = combat.combat_time
+            print("|cff00ffaa[StormsDungeonData]|r Details combat_time: " .. tostring(detailsDuration))
+        elseif combat.GetDate and type(combat.GetDate) == "function" then
+            local startTime, endTime = combat:GetDate()
+            if startTime and endTime then
+                detailsDuration = endTime - startTime
+                print("|cff00ffaa[StormsDungeonData]|r Details calculated from dates: " .. tostring(detailsDuration) .. " (start: " .. tostring(startTime) .. ", end: " .. tostring(endTime) .. ")")
+            end
+        end
+    end
+
     local level, affixes, _, keystoneUpgrades, mapID, name = nil, nil, nil, nil, nil, nil
     if C_ChallengeMode and type(C_ChallengeMode.GetActiveKeystoneInfo) == "function" then
         local a, b, c, d, e, f = C_ChallengeMode.GetActiveKeystoneInfo()
@@ -565,7 +628,10 @@ function Events:BuildRunDataFromActiveKeystone()
 
     level = completionLevel or level
     keystoneUpgrades = completionKeystoneUpgrades or keystoneUpgrades
-    local durationSeconds = NormalizeDurationSeconds(completionTime)
+    
+    -- Prefer Details duration if available, otherwise use completion time
+    local durationSeconds = detailsDuration or NormalizeDurationSeconds(completionTime)
+    print("|cff00ffaa[StormsDungeonData]|r Using duration: " .. tostring(durationSeconds) .. " (Details: " .. tostring(detailsDuration) .. ", Completion API: " .. tostring(completionTime) .. ")")
 
     if not mapID or not level then
         return false
@@ -629,29 +695,37 @@ function Events:Initialize()
 end
 
 function Events:OnEvent(event, ...)
-    if event == "ADDON_LOADED" then
-        local addonName = ...
-            if addonName == "StormsDungeonData" then
-            MPT:Initialize()
+    -- Add error handling wrapper to catch any issues
+    local success, err = pcall(function()
+        if event == "ADDON_LOADED" then
+            local addonName = ...
+                if addonName == "StormsDungeonData" then
+                MPT:Initialize()
+            end
+        elseif event == "PLAYER_ENTERING_WORLD" then
+            self:OnPlayerEnteringWorld()
+        elseif event == "CHALLENGE_MODE_COMPLETED" then
+            print("|cff00ffaa[StormsDungeonData]|r === CHALLENGE_MODE_COMPLETED EVENT RECEIVED ===")
+            self:OnChallengeModeCompleted()
+        elseif event == "LOOT_OPENED" then
+            self:OnLootOpened()
+        elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
+            -- Use CombatLogGetCurrentEventInfo inside handler
+            MPT.CombatLog:OnCombatLogEvent()
+        elseif event == "COMBAT_METRICS_SESSION_NEW" then
+            -- WoW 12.0+ event
+            MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
+        elseif event == "COMBAT_METRICS_SESSION_UPDATED" then
+            -- WoW 12.0+ event
+            MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
+        elseif event == "COMBAT_METRICS_SESSION_END" then
+            -- WoW 12.0+ event
+            MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
         end
-    elseif event == "PLAYER_ENTERING_WORLD" then
-        self:OnPlayerEnteringWorld()
-    elseif event == "CHALLENGE_MODE_COMPLETED" then
-        self:OnChallengeModeCompleted()
-    elseif event == "LOOT_OPENED" then
-        self:OnLootOpened()
-    elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        -- Use CombatLogGetCurrentEventInfo inside handler
-        MPT.CombatLog:OnCombatLogEvent()
-    elseif event == "COMBAT_METRICS_SESSION_NEW" then
-        -- WoW 12.0+ event
-        MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
-    elseif event == "COMBAT_METRICS_SESSION_UPDATED" then
-        -- WoW 12.0+ event
-        MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
-    elseif event == "COMBAT_METRICS_SESSION_END" then
-        -- WoW 12.0+ event
-        MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
+    end)
+    
+    if not success then
+        print("|cff00ffaa[StormsDungeonData]|r ERROR in OnEvent(" .. tostring(event) .. "): " .. tostring(err))
     end
 end
 
@@ -674,11 +748,49 @@ end
 function Events:OnChallengeModeCompleted()
     print("|cff00ffaa[StormsDungeonData]|r CHALLENGE_MODE_COMPLETED event fired")
     
-    -- Avoid re-creating run data if we already cached it and it isn't saved yet.
-    if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
-        print("|cff00ffaa[StormsDungeonData]|r Run already cached, waiting for save")
-        return
-    end
+    -- Wrap in pcall for safety
+    local success, err = pcall(function()
+        -- Avoid re-creating run data if we already cached it and it isn't saved yet.
+        -- BUT: ensure fallback timers are set even if run data exists
+        if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+            print("|cff00ffaa[StormsDungeonData]|r Run already cached, ensuring fallback timers are set...")
+            
+            -- Ensure fallback timers exist even if we return early
+            if C_Timer and C_Timer.After and not self.fallbackTimersSet then
+                self.fallbackTimersSet = true
+                
+                local timer1Success = pcall(function()
+                    C_Timer.After(8, function()
+                        if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+                            print("|cff00ffaa[StormsDungeonData]|r 8-second fallback timer triggered, auto-saving run (completed)")
+                            Events:FinalizeRun("completed")
+                        else
+                            print("|cff00ffaa[StormsDungeonData]|r 8-second timer fired but run already saved or missing")
+                        end
+                    end)
+                end)
+                
+                local timer2Success = pcall(function()
+                    C_Timer.After(45, function()
+                        if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+                            print("|cff00ffaa[StormsDungeonData]|r 45-second fallback timer triggered, auto-saving run (timeout)")
+                            Events:FinalizeRun("timeout")
+                        else
+                            print("|cff00ffaa[StormsDungeonData]|r 45-second timer fired but run already saved or missing")
+                        end
+                    end)
+                end)
+                
+                if timer1Success and timer2Success then
+                    print("|cff00ffaa[StormsDungeonData]|r Fallback timers set successfully (8s and 45s)")
+                else
+                    print("|cff00ffaa[StormsDungeonData]|r ERROR: Failed to create one or both timers!")
+                end
+            elseif not C_Timer or not C_Timer.After then
+                print("|cff00ffaa[StormsDungeonData]|r ERROR: C_Timer.After not available!")
+            end
+            return
+        end
 
     local completion = GetCompletionInfoCompat()
     local completionMapID = completion and completion.mapID or nil
@@ -709,6 +821,17 @@ function Events:OnChallengeModeCompleted()
     level = completionLevel or level
     keystoneUpgrades = completionKeystoneUpgrades or keystoneUpgrades
     local durationSeconds = NormalizeDurationSeconds(completionTime)
+    
+    -- Capture additional completion data (Details! style)
+    local onTime = completion and completion.onTime
+    local practiceRun = completion and completion.practiceRun
+    local isAffixRecord = completion and completion.isAffixRecord
+    local isMapRecord = completion and completion.isMapRecord
+    local isEligibleForScore = completion and completion.isEligibleForScore
+    local oldDungeonScore = completion and completion.oldOverallDungeonScore
+    local newDungeonScore = completion and completion.newOverallDungeonScore
+    
+    print("|cff00ffaa[StormsDungeonData]|r Completion info: mapID=" .. tostring(mapID) .. ", level=" .. tostring(level) .. ", time=" .. tostring(durationSeconds) .. "s, onTime=" .. tostring(onTime))
 
     if mapID and level then
         self.challengeRetryCount = 0
@@ -722,6 +845,15 @@ function Events:OnChallengeModeCompleted()
             or time()
         if durationSeconds and durationSeconds > 0 then
             startTime = time() - durationSeconds
+        end
+        
+        -- Capture enemy forces data NOW while we're still in the dungeon
+        -- This prevents issues if the player leaves before FinalizeRun is called
+        local earlyForces = GetEnemyForcesProgress()
+        local capturedMobData = false
+        if earlyForces and earlyForces.percent and earlyForces.percent > 0 then
+            capturedMobData = true
+            print("|cff00ffaa[StormsDungeonData]|r Captured mob data at completion: " .. string.format("%.1f%%", earlyForces.percent) .. " (" .. tostring(earlyForces.current) .. "/" .. tostring(earlyForces.total) .. ")")
         end
 
         -- Store run info for later
@@ -737,27 +869,63 @@ function Events:OnChallengeModeCompleted()
             completionTime = time(),
             completionDuration = durationSeconds,
             saved = false,
+            
+            -- Pre-capture mob data if available (prevents loss if player leaves dungeon)
+            mobsKilled = capturedMobData and (earlyForces.current or 0) or nil,
+            mobsTotal = capturedMobData and (earlyForces.total or 0) or nil,
+            overallMobPercentage = capturedMobData and earlyForces.percent or nil,
+            
+            -- Additional completion data (Details! style)
+            onTime = onTime,
+            practiceRun = practiceRun,
+            isAffixRecord = isAffixRecord,
+            isMapRecord = isMapRecord,
+            isEligibleForScore = isEligibleForScore,
+            oldDungeonScore = oldDungeonScore,
+            newDungeonScore = newDungeonScore,
         }
         
         print("|cff00ffaa[StormsDungeonData]|r Challenge mode completed!")
         print("|cff00ffaa[StormsDungeonData]|r Run data cached, waiting for loot chest...")
+        print("|cff00ffaa[StormsDungeonData]|r Duration from API: " .. tostring(durationSeconds) .. " seconds")
+        print("|cff00ffaa[StormsDungeonData]|r Calculated startTime: " .. tostring(startTime) .. ", completionTime: " .. tostring(time()))
+        print("|cff00ffaa[StormsDungeonData]|r Key upgraded: " .. tostring(keystoneUpgrades) .. " levels, onTime: " .. tostring(onTime))
 
         -- Save/show shortly after completion even if LOOT_OPENED never fires.
         -- This fixes runs that reward via UI/mail and never open a loot window.
+        self.fallbackTimersSet = true
         if C_Timer and C_Timer.After then
-            C_Timer.After(8, function()
-                if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
-                    print("|cff00ffaa[StormsDungeonData]|r 8-second fallback timer triggered, auto-saving run (completed)")
-                    Events:FinalizeRun("completed")
-                end
+            print("|cff00ffaa[StormsDungeonData]|r Creating fallback timers...")
+            
+            local timer1Success = pcall(function()
+                C_Timer.After(8, function()
+                    if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+                        print("|cff00ffaa[StormsDungeonData]|r 8-second fallback timer triggered, auto-saving run (completed)")
+                        Events:FinalizeRun("completed")
+                    else
+                        print("|cff00ffaa[StormsDungeonData]|r 8-second timer fired but run already saved or missing")
+                    end
+                end)
             end)
-            -- Secondary safety net.
-            C_Timer.After(45, function()
-                if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
-                    print("|cff00ffaa[StormsDungeonData]|r 45-second fallback timer triggered, auto-saving run (timeout)")
-                    Events:FinalizeRun("timeout")
-                end
+            
+            local timer2Success = pcall(function()
+                C_Timer.After(45, function()
+                    if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+                        print("|cff00ffaa[StormsDungeonData]|r 45-second fallback timer triggered, auto-saving run (timeout)")
+                        Events:FinalizeRun("timeout")
+                    else
+                        print("|cff00ffaa[StormsDungeonData]|r 45-second timer fired but run already saved or missing")
+                    end
+                end)
             end)
+            
+            if timer1Success and timer2Success then
+                print("|cff00ffaa[StormsDungeonData]|r Fallback timers set successfully (8s and 45s)")
+            else
+                print("|cff00ffaa[StormsDungeonData]|r ERROR: Failed to create one or both timers (8s=" .. tostring(timer1Success) .. ", 45s=" .. tostring(timer2Success) .. ")")
+            end
+        else
+            print("|cff00ffaa[StormsDungeonData]|r WARNING: C_Timer not available, fallback timers not set!")
         end
     else
         -- Some clients return completion info slightly later. Retry a few times.
@@ -776,10 +944,18 @@ function Events:OnChallengeModeCompleted()
             end
         end
     end
+    end) -- end of pcall
+    
+    if not success then
+        print("|cff00ffaa[StormsDungeonData]|r ERROR in OnChallengeModeCompleted: " .. tostring(err))
+    end
 end
 
 function Events:FinalizeRun(reason)
     print("|cff00ffaa[StormsDungeonData]|r FinalizeRun called (reason: " .. tostring(reason) .. ")")
+    
+    -- Reset fallback timer flag for next run
+    self.fallbackTimersSet = false
     
     if not MPT.CurrentRunData then
         print("|cff00ffaa[StormsDungeonData]|r No current run data, attempting to build from keystone")
@@ -800,7 +976,11 @@ function Events:FinalizeRun(reason)
         if not MPT.CurrentRunData.startTime then
             MPT.CurrentRunData.startTime = (MPT.CombatLog and MPT.CombatLog.startTime) or time()
         end
-        MPT.CurrentRunData.completionDuration = time() - (MPT.CurrentRunData.startTime or time())
+        -- Use completionDuration if available (from API), otherwise calculate from timestamps
+        if not MPT.CurrentRunData.completionDuration or MPT.CurrentRunData.completionDuration <= 0 then
+            MPT.CurrentRunData.completionDuration = time() - (MPT.CurrentRunData.startTime or time())
+        end
+        print("|cff00ffaa[StormsDungeonData]|r Run marked completed, duration: " .. tostring(MPT.CurrentRunData.completionDuration) .. "s")
     end
 
     -- Finalize combat totals before saving/showing (matches how Details reads overall data)
@@ -808,35 +988,67 @@ function Events:FinalizeRun(reason)
         MPT.CombatLog:FinalizeNewAPIData()
     end
 
+    -- Prefer the API-provided duration over calculated duration for accuracy
     local duration = MPT.CurrentRunData.completionDuration
     if not duration or duration <= 0 then
         duration = time() - (MPT.CurrentRunData.startTime or time())
+        print("|cff00ffaa[StormsDungeonData]|r WARNING: No valid completionDuration, calculated from timestamps: " .. tostring(duration) .. "s")
+    else
+        print("|cff00ffaa[StormsDungeonData]|r Using duration: " .. tostring(duration) .. "s (from completionDuration)")
     end
     MPT.CurrentRunData.duration = duration
 
-    -- Get mob percentage from combat log if available; otherwise fall back to scenario criteria (MPlusTimer-style).
-    if MPT.CombatLog.mobsKilled and MPT.CombatLog.mobsTotal > 0 then
+    -- Get mob percentage - try multiple sources in order of reliability
+    -- Priority: 1) Pre-captured at completion, 2) CombatLog, 3) Scenario API, 4) Assume 100%
+    local mobDataSource = "none"
+    
+    -- Method 0: Use pre-captured data from OnChallengeModeCompleted if available
+    if MPT.CurrentRunData.overallMobPercentage and MPT.CurrentRunData.overallMobPercentage > 0 then
+        mobDataSource = "pre-captured at completion"
+        print("|cff00ffaa[StormsDungeonData]|r Using pre-captured mob %: " .. string.format("%.1f%%", MPT.CurrentRunData.overallMobPercentage))
+    -- Method 1: CombatLog tracking (if we have valid data)
+    elseif MPT.CombatLog and MPT.CombatLog.mobsKilled and MPT.CombatLog.mobsTotal and MPT.CombatLog.mobsTotal > 0 then
         MPT.CurrentRunData.mobsKilled = MPT.CombatLog.mobsKilled
         MPT.CurrentRunData.mobsTotal = MPT.CombatLog.mobsTotal
         MPT.CurrentRunData.overallMobPercentage = (MPT.CombatLog.mobsKilled / MPT.CombatLog.mobsTotal) * 100
+        mobDataSource = "CombatLog"
         print("|cff00ffaa[StormsDungeonData]|r Mob % from CombatLog: " .. string.format("%.1f%%", MPT.CurrentRunData.overallMobPercentage) .. " (" .. MPT.CombatLog.mobsKilled .. "/" .. MPT.CombatLog.mobsTotal .. ")")
     else
-        print("|cff00ffaa[StormsDungeonData]|r CombatLog mob data not available (mobsKilled=" .. tostring(MPT.CombatLog and MPT.CombatLog.mobsKilled) .. ", mobsTotal=" .. tostring(MPT.CombatLog and MPT.CombatLog.mobsTotal) .. "), trying Scenario API...")
+        print("|cff00ffaa[StormsDungeonData]|r CombatLog mob data not available (mobsKilled=" .. tostring(MPT.CombatLog and MPT.CombatLog.mobsKilled) .. ", mobsTotal=" .. tostring(MPT.CombatLog and MPT.CombatLog.mobsTotal) .. ")")
+        
+        -- Method 2: Scenario API (real-time data from game)
+        print("|cff00ffaa[StormsDungeonData]|r Trying Scenario API for mob data...")
         local forces = GetEnemyForcesProgress()
-        if forces then
+        if forces and forces.percent and forces.percent > 0 then
             MPT.CurrentRunData.mobsKilled = forces.current or 0
             MPT.CurrentRunData.mobsTotal = forces.total or 0
-            if forces.percent then
-                MPT.CurrentRunData.overallMobPercentage = forces.percent
-                print("|cff00ffaa[StormsDungeonData]|r Mob % from Scenario API (percent): " .. string.format("%.1f%%", forces.percent))
-            elseif forces.total > 0 then
-                MPT.CurrentRunData.overallMobPercentage = (forces.current / forces.total) * 100
-                print("|cff00ffaa[StormsDungeonData]|r Mob % from Scenario API (calculated): " .. string.format("%.1f%%", MPT.CurrentRunData.overallMobPercentage) .. " (" .. forces.current .. "/" .. forces.total .. ")")
-            end
+            MPT.CurrentRunData.overallMobPercentage = forces.percent
+            mobDataSource = "Scenario API (percent)"
+            print("|cff00ffaa[StormsDungeonData]|r Mob % from Scenario API (percent): " .. string.format("%.1f%%", forces.percent))
+        elseif forces and forces.current and forces.total and forces.total > 0 then
+            MPT.CurrentRunData.mobsKilled = forces.current
+            MPT.CurrentRunData.mobsTotal = forces.total
+            MPT.CurrentRunData.overallMobPercentage = (forces.current / forces.total) * 100
+            mobDataSource = "Scenario API (calculated)"
+            print("|cff00ffaa[StormsDungeonData]|r Mob % from Scenario API (calculated): " .. string.format("%.1f%%", MPT.CurrentRunData.overallMobPercentage) .. " (" .. forces.current .. "/" .. forces.total .. ")")
         else
-            print("|cff00ffaa[StormsDungeonData]|r Warning: Could not get mob percentage (no data from CombatLog or Scenario API)")
+            print("|cff00ffaa[StormsDungeonData]|r Scenario API returned no valid data")
+            
+            -- Method 3: Assume 100% if run was completed successfully
+            if MPT.CurrentRunData.completed and MPT.CurrentRunData.onTime ~= false then
+                -- If the run was completed (especially if onTime), assume 100% mob count
+                MPT.CurrentRunData.overallMobPercentage = 100
+                mobDataSource = "assumed (completed run)"
+                print("|cff00ffaa[StormsDungeonData]|r WARNING: No mob data available, assuming 100% for completed run")
+            else
+                print("|cff00ffaa[StormsDungeonData]|r WARNING: Could not get mob percentage from any source")
+                MPT.CurrentRunData.overallMobPercentage = 0
+                mobDataSource = "failed"
+            end
         end
     end
+    
+    print("|cff00ffaa[StormsDungeonData]|r Final mob data source: " .. mobDataSource)
 
     -- Copy tracked stats into player records (so UI and saved history match Details totals)
     local sumBase = 0
@@ -939,6 +1151,12 @@ function Events:OnLootOpened()
     -- Check if this is the mythic+ chest
     local numLootItems = GetNumLootItems()
     
+    print("|cff00ffaa[StormsDungeonData]|r LOOT_OPENED event fired, numLootItems=" .. tostring(numLootItems))
+    print("|cff00ffaa[StormsDungeonData]|r MPT.CurrentRunData exists: " .. tostring(MPT.CurrentRunData ~= nil))
+    if MPT.CurrentRunData then
+        print("|cff00ffaa[StormsDungeonData]|r CurrentRunData.completed=" .. tostring(MPT.CurrentRunData.completed) .. ", saved=" .. tostring(MPT.CurrentRunData.saved) .. ", completionTime=" .. tostring(MPT.CurrentRunData.completionTime))
+    end
+    
     if numLootItems > 0 and not MPT.CurrentRunData then
         print("|cff00ffaa[StormsDungeonData]|r Loot opened but no current run, attempting to build from keystone")
         self:BuildRunDataFromActiveKeystone()
@@ -947,10 +1165,14 @@ function Events:OnLootOpened()
     if numLootItems > 0 and MPT.CurrentRunData then
         -- Accept loot within a short window after completion; item quality checks are unreliable across seasons/rewards.
         local withinWindow = false
+        local timeSinceCompletion = nil
         if MPT.CurrentRunData.completionTime then
-            withinWindow = (time() - MPT.CurrentRunData.completionTime) <= 600
+            timeSinceCompletion = time() - MPT.CurrentRunData.completionTime
+            withinWindow = timeSinceCompletion <= 600
         end
 
+        print("|cff00ffaa[StormsDungeonData]|r Time since completion: " .. tostring(timeSinceCompletion) .. "s, withinWindow=" .. tostring(withinWindow))
+        
         local hasAnyItem = numLootItems and numLootItems > 0
         local looksLikeReward = false
         for i = 1, numLootItems do
@@ -961,9 +1183,15 @@ function Events:OnLootOpened()
             end
         end
 
-        if withinWindow and hasAnyItem and (looksLikeReward or true) then
+        print("|cff00ffaa[StormsDungeonData]|r hasAnyItem=" .. tostring(hasAnyItem) .. ", looksLikeReward=" .. tostring(looksLikeReward))
+        
+        if MPT.CurrentRunData.saved then
+            print("|cff00ffaa[StormsDungeonData]|r Run already saved, skipping loot-triggered save")
+        elseif withinWindow and hasAnyItem and (looksLikeReward or true) then
             print("|cff00ffaa[StormsDungeonData]|r Loot chest detected, auto-saving run (loot)")
             self:FinalizeRun("loot")
+        else
+            print("|cff00ffaa[StormsDungeonData]|r Loot NOT triggering save: withinWindow=" .. tostring(withinWindow) .. ", hasAnyItem=" .. tostring(hasAnyItem) .. ", saved=" .. tostring(MPT.CurrentRunData.saved))
         end
     elseif numLootItems > 0 and MPT.LastSavedRun and not MPT.LastSavedRunShown then
         -- Run was already saved (auto/timeout/exit). If the chest is looted later, show the scoreboard now.
