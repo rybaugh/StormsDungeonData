@@ -195,11 +195,51 @@ local function HandleSlashCommand(msg, editbox)
 
     if cmd == "history" or cmd == "h" then
         MPT.HistoryViewer:Show()
-    elseif cmd == "save" then
-        if not IsPlayerInCorrectDungeon() then
-            print("|cff00ffaa[StormsDungeonData]|r Manual save only allowed inside the dungeon you just completed")
-            return
+    elseif cmd == "save" or cmd == "force" then
+        -- If no CurrentRunData exists, try to detect and reconstruct from C_MythicPlus.GetRunHistory()
+        if not MPT.CurrentRunData and C_MythicPlus and C_MythicPlus.GetRunHistory then
+            print("|cff00ffaa[StormsDungeonData]|r No pending run data, attempting to reconstruct from run history...")
+            local runHistory = C_MythicPlus.GetRunHistory(false, true) -- (includePracticeRuns, includeCurrentSeason)
+            if runHistory and #runHistory > 0 then
+                -- Log all runs found for debugging
+                print("|cff00ffaa[StormsDungeonData]|r Found " .. #runHistory .. " runs in history:")
+                for i, run in ipairs(runHistory) do
+                    local dungeonName = C_ChallengeMode.GetMapUIInfo(run.mapChallengeModeID)
+                    print("  [" .. i .. "] " .. (dungeonName or "Unknown") .. " +" .. run.level .. " (completed=" .. tostring(run.completed) .. ")")
+                end
+                
+                -- Always use the LAST completed run in the array (most recent)
+                local latestRun = nil
+                for i = #runHistory, 1, -1 do
+                    local run = runHistory[i]
+                    if run.completed then
+                        latestRun = run
+                        break
+                    end
+                end
+                
+                if latestRun then
+                    local dungeonName = C_ChallengeMode.GetMapUIInfo(latestRun.mapChallengeModeID)
+                    print("|cff00ffaa[StormsDungeonData]|r Using most recent run: " .. (dungeonName or "Unknown") .. " +" .. latestRun.level)
+                    
+                    -- Reconstruct CurrentRunData from run history
+                    if MPT.Events and MPT.Events.ReconstructRunDataFromHistory then
+                        MPT.Events:ReconstructRunDataFromHistory(latestRun)
+                    end
+                else
+                    print("|cff00ffaa[StormsDungeonData]|r No completed runs found in history")
+                end
+            else
+                print("|cff00ffaa[StormsDungeonData]|r No recent runs found in history")
+            end
         end
+        
+        -- If CurrentRunData still doesn't exist, try calling OnChallengeModeCompleted
+        if not MPT.CurrentRunData and MPT.Events and MPT.Events.OnChallengeModeCompleted then
+            print("|cff00ffaa[StormsDungeonData]|r Attempting to detect completion...")
+            MPT.Events:OnChallengeModeCompleted()
+        end
+        
         local saved = false
         if MPT.Events and MPT.Events.FinalizeRun then
             saved = MPT.Events:FinalizeRun("manual") or false
@@ -209,7 +249,15 @@ local function HandleSlashCommand(msg, editbox)
             -- If disabled, we could show it here explicitly with MPT.UI:ShowScoreboard(MPT.LastSavedRun)
             print("|cff00ffaa[StormsDungeonData]|r Run saved manually!")
         else
-            print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
+            print("|cff00ffaa[StormsDungeonData]|r No pending run to save - try /sdd test or /sdd force")
+            if C_ChallengeMode and C_ChallengeMode.GetCompletionInfo then
+                local completionInfo = C_ChallengeMode.GetCompletionInfo()
+                if completionInfo then
+                    print("|cff00ffaa[StormsDungeonData]|r DEBUG: GetCompletionInfo returned data but CurrentRunData was not created")
+                else
+                    print("|cff00ffaa[StormsDungeonData]|r DEBUG: GetCompletionInfo returned nil - no completion detected")
+                end
+            end
         end
     elseif cmd == "reset" then
         StormsDungeonDataDB = MPT.Database:CreateDefaultDB()
@@ -217,12 +265,45 @@ local function HandleSlashCommand(msg, editbox)
     elseif cmd == "status" then
         print("|cff00ffaa[StormsDungeonData]|r Status:")
         print("  Total runs: " .. #StormsDungeonDataDB.runs)
+        print("  Current run data exists: " .. tostring(MPT.CurrentRunData ~= nil))
+        print("  In mythic plus: " .. tostring(MPT.InMythicPlus or false))
+        if MPT.CurrentRunData then
+            print("  Current run: " .. tostring(MPT.CurrentRunData.dungeonName) .. " +" .. tostring(MPT.CurrentRunData.keystoneLevel))
+            print("  Completed: " .. tostring(MPT.CurrentRunData.completed))
+            print("  Saved: " .. tostring(MPT.CurrentRunData.saved))
+        end
         print("  Type |cff00ffaa/sdd history|r to view history")
+    elseif cmd == "test" then
+        print("|cff00ffaa[StormsDungeonData]|r Testing completion detection...")
+        if MPT.Events and MPT.Events.OnChallengeModeCompleted then
+            MPT.Events:OnChallengeModeCompleted()
+        end
+    elseif cmd == "events" then
+        print("|cff00ffaa[StormsDungeonData]|r Testing event registration...")
+        print("  Event frame exists: " .. tostring(MPT.Events and MPT.Events.frame ~= nil))
+        if MPT.Events and MPT.Events.frame then
+            print("  Frame registered for events: true")
+            -- Try to manually check C_ChallengeMode
+            if C_ChallengeMode and C_ChallengeMode.GetActiveChallengeMapID then
+                local mapID = C_ChallengeMode.GetActiveChallengeMapID()
+                print("  Active challenge map ID: " .. tostring(mapID))
+            end
+            if C_ChallengeMode and C_ChallengeMode.GetActiveKeystoneInfo then
+                local info = C_ChallengeMode.GetActiveKeystoneInfo()
+                if type(info) == "table" then
+                    print("  Active keystone: +" .. tostring(info.level or info.keystoneLevel))
+                elseif info then
+                    print("  Active keystone level: +" .. tostring(info))
+                end
+            end
+        end
     elseif cmd == "" or cmd == "help" then
         print("|cff00ffaa[StormsDungeonData]|r Commands:")
         print("  |cff00ffaa/sdd history|r - Show run history")
         print("  |cff00ffaa/sdd save|r - Manually save pending run")
         print("  |cff00ffaa/sdd status|r - Show addon status")
+        print("  |cff00ffaa/sdd test|r - Test completion detection")
+        print("  |cff00ffaa/sdd events|r - Test event registration")
         print("  |cff00ffaa/sdd reset|r - Reset database")
         print("  |cff00ffaa/sdd help|r - Show this message")
     else

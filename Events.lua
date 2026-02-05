@@ -675,6 +675,14 @@ function Events:Initialize()
     self.frame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
     self.frame:RegisterEvent("CHALLENGE_MODE_MAPS_UPDATE")
     self.frame:RegisterEvent("LOOT_OPENED")
+    
+    -- Additional completion detection events
+    self.frame:RegisterEvent("CHALLENGE_MODE_START")
+    self.frame:RegisterEvent("SCENARIO_COMPLETED")
+    self.frame:RegisterEvent("WORLD_STATE_TIMER_STOP")
+    
+    -- New: Use official completion rewards event (more reliable)
+    self.frame:RegisterEvent("CHALLENGE_MODE_COMPLETED_REWARDS")
 
     -- Always listen to CLEU for deaths/mob kills; WoW 12+ uses C_DamageMeter for damage/healing/interrupt totals.
     self.frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
@@ -685,6 +693,9 @@ function Events:Initialize()
         self.frame:RegisterEvent("COMBAT_METRICS_SESSION_NEW")
         self.frame:RegisterEvent("COMBAT_METRICS_SESSION_UPDATED")
         self.frame:RegisterEvent("COMBAT_METRICS_SESSION_END")
+        
+        -- WoW 12.0+: Damage meter events can indicate session end
+        self.frame:RegisterEvent("DAMAGE_METER_COMBAT_SESSION_UPDATED")
     end
     
     self.frame:SetScript("OnEvent", function(self, event, ...)
@@ -692,13 +703,17 @@ function Events:Initialize()
     end)
     
     print("|cff00ffaa[StormsDungeonData]|r Events module initialized")
+    print("|cff00ffaa[StormsDungeonData]|r Registered for: CHALLENGE_MODE_COMPLETED, CHALLENGE_MODE_COMPLETED_REWARDS, CHALLENGE_MODE_START")
 end
 
 function Events:OnEvent(event, ...)
+    -- Capture varargs before pcall
+    local args = {...}
+    
     -- Add error handling wrapper to catch any issues
     local success, err = pcall(function()
         if event == "ADDON_LOADED" then
-            local addonName = ...
+            local addonName = args[1]
                 if addonName == "StormsDungeonData" then
                 MPT:Initialize()
             end
@@ -707,6 +722,51 @@ function Events:OnEvent(event, ...)
         elseif event == "CHALLENGE_MODE_COMPLETED" then
             print("|cff00ffaa[StormsDungeonData]|r === CHALLENGE_MODE_COMPLETED EVENT RECEIVED ===")
             self:OnChallengeModeCompleted()
+        elseif event == "CHALLENGE_MODE_COMPLETED_REWARDS" then
+            -- This event fires AFTER completion and includes all completion data as payload
+            local mapID, medal, timeMS, money, rewards = args[1], args[2], args[3], args[4], args[5]
+            print("|cff00ffaa[StormsDungeonData]|r === CHALLENGE_MODE_COMPLETED_REWARDS EVENT RECEIVED ===")
+            print("|cff00ffaa[StormsDungeonData]|r Payload: mapID=" .. tostring(mapID) .. ", timeMS=" .. tostring(timeMS))
+            
+            -- This is a very reliable event - trigger completion with slight delay for API to update
+            C_Timer.After(0.1, function()
+                self:OnChallengeModeCompleted()
+            end)
+        elseif event == "CHALLENGE_MODE_START" then
+            local mapID = args[1]
+            print("|cff00ffaa[StormsDungeonData]|r CHALLENGE_MODE_START event received (mapID=" .. tostring(mapID) .. ")")
+            -- Store that we're in a mythic+ run
+            MPT.InMythicPlus = true
+            MPT.MythicPlusMapID = mapID
+        elseif event == "SCENARIO_COMPLETED" then
+            print("|cff00ffaa[StormsDungeonData]|r SCENARIO_COMPLETED event received (potential key completion)")
+            if MPT.InMythicPlus then
+                -- Give a moment for APIs to update, then trigger completion
+                C_Timer.After(0.5, function()
+                    self:OnChallengeModeCompleted()
+                end)
+            end
+        elseif event == "WORLD_STATE_TIMER_STOP" then
+            print("|cff00ffaa[StormsDungeonData]|r WORLD_STATE_TIMER_STOP event received (potential key completion)")
+            if MPT.InMythicPlus then
+                -- Give a moment for APIs to update, then trigger completion
+                C_Timer.After(0.5, function()
+                    self:OnChallengeModeCompleted()
+                end)
+            end
+        elseif event == "DAMAGE_METER_COMBAT_SESSION_UPDATED" then
+            -- WoW 12.0+ event that fires when combat session updates
+            local dmType, sessionID = args[1], args[2]
+            -- Check if this is a mythic+ session ending
+            if C_DamageMeter and C_DamageMeter.GetAvailableCombatSessions then
+                local sessions = C_DamageMeter.GetAvailableCombatSessions()
+                for _, session in ipairs(sessions) do
+                    if session.sessionID == sessionID and session.durationSeconds and MPT.InMythicPlus then
+                        -- Session has ended (has duration), might be key completion
+                        print("|cff00ffaa[StormsDungeonData]|r Damage meter session ended (sessionID=" .. sessionID .. ", duration=" .. session.durationSeconds .. "s)")
+                    end
+                end
+            end
         elseif event == "LOOT_OPENED" then
             self:OnLootOpened()
         elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
@@ -714,13 +774,13 @@ function Events:OnEvent(event, ...)
             MPT.CombatLog:OnCombatLogEvent()
         elseif event == "COMBAT_METRICS_SESSION_NEW" then
             -- WoW 12.0+ event
-            MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
+            MPT.DamageMeterCompat:OnDamageMeterEvent(event, unpack(args))
         elseif event == "COMBAT_METRICS_SESSION_UPDATED" then
             -- WoW 12.0+ event
-            MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
+            MPT.DamageMeterCompat:OnDamageMeterEvent(event, unpack(args))
         elseif event == "COMBAT_METRICS_SESSION_END" then
             -- WoW 12.0+ event
-            MPT.DamageMeterCompat:OnDamageMeterEvent(event, ...)
+            MPT.DamageMeterCompat:OnDamageMeterEvent(event, unpack(args))
         end
     end)
     
@@ -1238,6 +1298,71 @@ function Events:SimulateLootOpened()
     end
 
     self:FinalizeRun("manual-loot")
+end
+
+-- Reconstruct CurrentRunData from C_MythicPlus.GetRunHistory() entry
+function Events:ReconstructRunDataFromHistory(runInfo)
+    if not runInfo then
+        print("|cff00ffaa[StormsDungeonData]|r Cannot reconstruct run: no run info provided")
+        return false
+    end
+    
+    print("|cff00ffaa[StormsDungeonData]|r Reconstructing run data from history...")
+    
+    -- Get dungeon info
+    local dungeonName = C_ChallengeMode.GetMapUIInfo(runInfo.mapChallengeModeID)
+    if not dungeonName then
+        dungeonName = "Unknown Dungeon"
+    end
+    
+    -- Get current affixes
+    local affixes = {}
+    local affixIDs = C_MythicPlus.GetCurrentAffixes()
+    if affixIDs then
+        for _, affixInfo in ipairs(affixIDs) do
+            table.insert(affixes, affixInfo.id)
+        end
+    end
+    
+    -- Initialize CurrentRunData
+    MPT.CurrentRunData = {
+        dungeonName = dungeonName,
+        mapID = runInfo.mapChallengeModeID,
+        keystoneLevel = runInfo.level,
+        affixes = affixes,
+        startTime = time() - runInfo.durationSec, -- Estimate start time
+        completionTime = time(),
+        completionDuration = runInfo.durationSec,
+        completed = runInfo.completed,
+        totalEnemyForces = 100.0, -- Assume 100% for completed runs
+        enemyForcesCurrent = 100.0,
+        groupMembers = {},
+        saved = false,
+        reconstructed = true -- Flag to indicate this was reconstructed
+    }
+    
+    -- Try to get group member info
+    if self.CollectGroupPlayerStats then
+        local members = self:CollectGroupPlayerStats()
+        if members then
+            MPT.CurrentRunData.groupMembers = members
+        end
+    end
+    
+    -- Try to get completion info for more details
+    if C_ChallengeMode and C_ChallengeMode.GetCompletionInfo then
+        local completionInfo = C_ChallengeMode.GetCompletionInfo()
+        if completionInfo then
+            MPT.CurrentRunData.onTime = completionInfo.onTime
+            MPT.CurrentRunData.keystoneUpgrades = completionInfo.keystoneUpgrades
+            if completionInfo.members then
+                MPT.CurrentRunData.groupMembers = completionInfo.members
+            end
+        end
+    end
+    
+    print("|cff00ffaa[StormsDungeonData]|r Reconstructed: " .. dungeonName .. " +" .. runInfo.level .. " (" .. runInfo.durationSec .. "s)")
+    return true
 end
 
 print("|cff00ffaa[StormsDungeonData]|r Events module loaded")
