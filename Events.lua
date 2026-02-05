@@ -354,13 +354,9 @@ local function GetEnemyForcesProgress()
         print("|cff00ffaa[SDD]|r Calculated using RaiderIO method: current=" .. tostring(current) .. ", total=" .. tostring(total) .. ", percent=" .. tostring(percent) .. "%")
     end
 
-    -- Ensure percent is within bounds
-    if percent then
-        if percent > 100 then
-            percent = 100
-        elseif percent < 0 then
-            percent = 0
-        end
+    -- Only cap at minimum 0%, allow values over 100%
+    if percent and percent < 0 then
+        percent = 0
     end
 
     if not current and not total and not percent then
@@ -738,6 +734,26 @@ function Events:OnEvent(event, ...)
             -- Store that we're in a mythic+ run
             MPT.InMythicPlus = true
             MPT.MythicPlusMapID = mapID
+            MPT.LastEnemyForces = nil
+            
+            -- Start periodic tracking of enemy forces (every 5 seconds)
+            if not self.enemyForcesTracker then
+                self.enemyForcesTracker = C_Timer.NewTicker(5, function()
+                    if MPT.InMythicPlus then
+                        local forces = GetEnemyForcesProgress()
+                        if forces and forces.percent then
+                            MPT.LastEnemyForces = forces
+                            print("|cff00ffaa[StormsDungeonData]|r Tracked enemy forces: " .. string.format("%.1f%%", forces.percent))
+                        end
+                    else
+                        -- Stop tracking when not in mythic+
+                        if self.enemyForcesTracker then
+                            self.enemyForcesTracker:Cancel()
+                            self.enemyForcesTracker = nil
+                        end
+                    end
+                end)
+            end
         elseif event == "SCENARIO_COMPLETED" then
             print("|cff00ffaa[StormsDungeonData]|r SCENARIO_COMPLETED event received (potential key completion)")
             if MPT.InMythicPlus then
@@ -801,6 +817,44 @@ function Events:OnPlayerEnteringWorld()
             print("|cff00ffaa[StormsDungeonData]|r Player teleported out of dungeon, auto-saving run (exit)")
             self:FinalizeRun("exit")
         end
+        
+        -- Check if we were in a mythic+ and now we're not (key completed but events didn't fire)
+        if MPT.InMythicPlus then
+            print("|cff00ffaa[StormsDungeonData]|r Was in mythic+, now left instance - checking for completed run...")
+            MPT.InMythicPlus = false
+            
+            -- Wait a moment for APIs to update, then check run history
+            C_Timer.After(1, function()
+                if not MPT.CurrentRunData or MPT.CurrentRunData.saved then
+                    -- No pending run or already saved, try to detect from history
+                    if C_MythicPlus and C_MythicPlus.GetRunHistory then
+                        local runHistory = C_MythicPlus.GetRunHistory(false, true)
+                        if runHistory and #runHistory > 0 then
+                            -- Find the most recent completed run
+                            local latestRun = nil
+                            for i = #runHistory, 1, -1 do
+                                if runHistory[i].completed then
+                                    latestRun = runHistory[i]
+                                    break
+                                end
+                            end
+                            
+                            if latestRun then
+                                local dungeonName = C_ChallengeMode.GetMapUIInfo(latestRun.mapChallengeModeID)
+                                print("|cff00ffaa[StormsDungeonData]|r Detected completed run from history: " .. (dungeonName or "Unknown") .. " +" .. latestRun.level)
+                                
+                                -- Reconstruct and save
+                                self:ReconstructRunDataFromHistory(latestRun)
+                                if MPT.CurrentRunData then
+                                    self:FinalizeRun("auto-detected")
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+        
         MPT.CombatLog:StopTracking()
     end
 end
@@ -1324,6 +1378,19 @@ function Events:ReconstructRunDataFromHistory(runInfo)
         end
     end
     
+    -- Get actual enemy forces data - try live data first, then fall back to cached
+    local enemyForces = GetEnemyForcesProgress()
+    local enemyPercent = 100.0
+    if enemyForces and enemyForces.percent then
+        enemyPercent = enemyForces.percent
+        print("|cff00ffaa[StormsDungeonData]|r Using live enemy forces: " .. string.format("%.1f%%", enemyPercent))
+    elseif MPT.LastEnemyForces and MPT.LastEnemyForces.percent then
+        enemyPercent = MPT.LastEnemyForces.percent
+        print("|cff00ffaa[StormsDungeonData]|r Using cached enemy forces: " .. string.format("%.1f%%", enemyPercent))
+    else
+        print("|cff00ffaa[StormsDungeonData]|r No enemy forces data available, assuming 100%")
+    end
+    
     -- Initialize CurrentRunData
     MPT.CurrentRunData = {
         dungeonName = dungeonName,
@@ -1334,19 +1401,17 @@ function Events:ReconstructRunDataFromHistory(runInfo)
         completionTime = time(),
         completionDuration = runInfo.durationSec,
         completed = runInfo.completed,
-        totalEnemyForces = 100.0, -- Assume 100% for completed runs
-        enemyForcesCurrent = 100.0,
+        totalEnemyForces = enemyPercent,
+        enemyForcesCurrent = enemyPercent,
         groupMembers = {},
         saved = false,
         reconstructed = true -- Flag to indicate this was reconstructed
     }
     
-    -- Try to get group member info
-    if self.CollectGroupPlayerStats then
-        local members = self:CollectGroupPlayerStats()
-        if members then
-            MPT.CurrentRunData.groupMembers = members
-        end
+    -- Collect group member stats (call local function)
+    local members = CollectGroupPlayerStats()
+    if members then
+        MPT.CurrentRunData.groupMembers = members
     end
     
     -- Try to get completion info for more details
