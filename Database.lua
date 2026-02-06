@@ -86,6 +86,22 @@ function MPT.Database:SaveRun(runRecord)
     return true
 end
 
+-- Delete a run by ID
+function MPT.Database:DeleteRun(runID)
+    if not runID or not StormsDungeonDataDB or not StormsDungeonDataDB.runs then
+        return false
+    end
+    
+    for i = #StormsDungeonDataDB.runs, 1, -1 do
+        if StormsDungeonDataDB.runs[i].id == runID then
+            table.remove(StormsDungeonDataDB.runs, i)
+            return true
+        end
+    end
+    
+    return false
+end
+
 -- Get all runs for a specific character
 function MPT.Database:GetRunsByCharacter(characterName, realm)
     local result = {}

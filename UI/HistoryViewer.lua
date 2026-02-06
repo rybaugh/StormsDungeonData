@@ -913,6 +913,44 @@ function HistoryViewer:UpdateDisplay()
             intValueText = "|cffff8000" .. intValueText .. "|r"
         end
         intText:SetText(intValueText)
+        x = x + 50
+
+        -- Delete button
+        local deleteBtn = CreateFrame("Button", nil, runRow)
+        deleteBtn:SetSize(18, 18)
+        deleteBtn:SetPoint("LEFT", runRow, "LEFT", x, 0)
+        deleteBtn:SetNormalTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
+        deleteBtn:SetHighlightTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Highlight")
+        deleteBtn:SetPushedTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Down")
+        deleteBtn:SetScript("OnClick", function()
+            StaticPopupDialogs["STORMSDUNGEONDATA_DELETE_RUN"] = {
+                text = "Delete this run?\n\n" .. (run.dungeonName or "Unknown") .. " +" .. (run.keystoneLevel or run.dungeonLevel or 0),
+                button1 = "Delete",
+                button2 = "Cancel",
+                OnAccept = function()
+                    if MPT.Database:DeleteRun(run.id) then
+                        print("|cff00ffaa[StormsDungeonData]|r Run deleted")
+                        self:UpdateDisplay()
+                    else
+                        print("|cff00ffaa[StormsDungeonData]|r Error: Could not delete run")
+                    end
+                end,
+                timeout = 0,
+                whileDead = true,
+                hideOnEscape = true,
+                preferredIndex = 3,
+            }
+            StaticPopup_Show("STORMSDUNGEONDATA_DELETE_RUN")
+        end)
+        deleteBtn:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Delete Run", 1, 1, 1)
+            GameTooltip:AddLine("Click to permanently delete this run", 1, 0.82, 0, true)
+            GameTooltip:Show()
+        end)
+        deleteBtn:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
 
         table.insert(self.frame.RunRows, runRow)
         runY = runY + 24

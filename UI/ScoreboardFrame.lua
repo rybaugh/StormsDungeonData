@@ -270,16 +270,11 @@ function Scoreboard:Create()
     heroIconText:SetTextColor(0.8, 0.8, 1, 1)  -- Light blue tint
     frame.HeroIconText = heroIconText
 
-    -- Duration + Mob % - bigger and under dungeon name
+    -- Duration - bigger and under dungeon name
     local duration = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
-    duration:SetPoint("TOPRIGHT", keystoneLevel, "BOTTOM", -10, -6)
-    duration:SetJustifyH("RIGHT")
+    duration:SetPoint("TOP", keystoneLevel, "BOTTOM", 0, -6)
+    duration:SetJustifyH("CENTER")
     frame.Duration = duration
-
-    local mobPercent = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
-    mobPercent:SetPoint("TOPLEFT", keystoneLevel, "BOTTOM", 10, -6)
-    mobPercent:SetJustifyH("LEFT")
-    frame.MobPercent = mobPercent
     
     -- Player stats table header
     local headerY = -155
@@ -466,11 +461,14 @@ function Scoreboard:Show(runRecord)
     local seconds = runRecord.duration % 60
     frame.Duration:SetText(string.format("%02d:%02d", minutes, seconds))
     
-    frame.MobPercent:SetText(string.format("%.1f%%", runRecord.overallMobPercentage or 0))
-    
     -- Populate player stats
     -- Support both real combat format (players array) and test format (playerStats dictionary)
     local playerData = runRecord.players or {}
+    if not playerData or #playerData == 0 then
+        if runRecord.groupMembers and #runRecord.groupMembers > 0 then
+            playerData = runRecord.groupMembers
+        end
+    end
     if not playerData or #playerData == 0 then
         -- Use playerStats dictionary from test mode
         playerData = {}
@@ -553,6 +551,16 @@ function Scoreboard:Show(runRecord)
 
     local mvpCandidates = {}
 
+    local function SafeText(value, fallback)
+        if value == nil then
+            return fallback or ""
+        end
+        if type(value) == "string" then
+            return value
+        end
+        return tostring(value)
+    end
+
     for i, player in ipairs(playerData) do
         if i <= 5 then
             local row = frame.PlayerRows[i]
@@ -569,7 +577,15 @@ function Scoreboard:Show(runRecord)
             end
 
             -- Color player name by class (use text color directly for reliability)
-            row.name:SetText(player.name or "")
+            local nameText = nil
+            if type(player.name) == "string" and player.name ~= "" then
+                nameText = player.name
+            elseif type(player.unitID) == "string" and player.unitID ~= "" then
+                nameText = player.unitID
+            elseif type(stats.name) == "string" and stats.name ~= "" then
+                nameText = stats.name
+            end
+            row.name:SetText(SafeText(nameText, "Unknown"))
             do
                 local classToken = player.class
                 local color
@@ -602,9 +618,9 @@ function Scoreboard:Show(runRecord)
                 interruptsText = "|cffff8000" .. interruptsText .. "|r"
             end
 
-            row.damage:SetText(damageText)
-            row.healing:SetText(healingText)
-            row.interrupts:SetText(interruptsText)
+            row.damage:SetText(SafeText(damageText, "0"))
+            row.healing:SetText(SafeText(healingText, "0"))
+            row.interrupts:SetText(SafeText(interruptsText, "0"))
 
             totalsDamage = totalsDamage + (stats.damage or 0)
             totalsHealing = totalsHealing + (stats.healing or 0)
@@ -644,12 +660,19 @@ function Scoreboard:Show(runRecord)
         end
     end
 
-    frame.TotalsText:SetText(string.format(
-        "Damage: |cffff8000%s|r   Healing: |cff00ff00%s|r   Interrupts: |cff0088ff%d|r",
-        MPT.Utils:FormatNumber(totalsDamage),
-        MPT.Utils:FormatNumber(totalsHealing),
-        totalsInterrupts
-    ))
+    -- Check if we have any combat data at all
+    local noCombatData = (totalsDamage == 0 and totalsHealing == 0 and totalsInterrupts == 0)
+    
+    if noCombatData then
+        frame.TotalsText:SetText("|cffff4444No combat data available - see chat for details|r")
+    else
+        frame.TotalsText:SetText(string.format(
+            "Damage: |cffff8000%s|r   Healing: |cff00ff00%s|r   Interrupts: |cff0088ff%d|r",
+            MPT.Utils:FormatNumber(totalsDamage),
+            MPT.Utils:FormatNumber(totalsHealing),
+            totalsInterrupts
+        ))
+    end
 
     if mvpIndex and frame.PlayerRows[mvpIndex] and frame.PlayerRows[mvpIndex].mvpBg then
         frame.PlayerRows[mvpIndex].mvpBg:Show()
@@ -657,7 +680,15 @@ function Scoreboard:Show(runRecord)
 
     if mvpPlayer and frame.MVPName and frame.MVPDetails then
         -- MVP name (class-colored)
-        frame.MVPName:SetText(mvpPlayer.name or "--")
+        local mvpName = nil
+        if type(mvpPlayer.name) == "string" and mvpPlayer.name ~= "" then
+            mvpName = mvpPlayer.name
+        elseif type(mvpPlayer.unitID) == "string" and mvpPlayer.unitID ~= "" then
+            mvpName = mvpPlayer.unitID
+        elseif mvpStats and type(mvpStats.name) == "string" and mvpStats.name ~= "" then
+            mvpName = mvpStats.name
+        end
+        frame.MVPName:SetText(SafeText(mvpName, "--"))
         local classToken = mvpPlayer.class
         if classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken] then
             local c = RAID_CLASS_COLORS[classToken]

@@ -69,12 +69,13 @@ SDDMinimapButtonMixin = {}
 
 local function OnMinimapClick(_, button)
     if button == "RightButton" then
-        local saved = false
-        if MPT and MPT.Events and MPT.Events.FinalizeRun then
-            saved = MPT.Events:FinalizeRun("manual") or false
-        end
-        if not saved then
-            print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
+        if MPT and MPT.PerformManualSave then
+            MPT.PerformManualSave("minimap")
+        elseif MPT and MPT.Events and MPT.Events.FinalizeRun then
+            local saved = MPT.Events:FinalizeRun("manual") or false
+            if not saved then
+                print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
+            end
         end
     else
         if MPT and MPT.HistoryViewer and MPT.HistoryViewer.Show then
@@ -221,7 +222,9 @@ function SDDMinimapButtonMixin:OnLoad()
 
     self:SetScript("OnClick", function(_, button)
         if button == "RightButton" then
-            if MPT and MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+            if MPT and MPT.PerformManualSave then
+                MPT.PerformManualSave("minimap")
+            elseif MPT and MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
                 if MPT.Events and MPT.Events.FinalizeRun then
                     MPT.Events:FinalizeRun("manual")
                 end

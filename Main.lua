@@ -119,6 +119,178 @@ local function IsPlayerInCorrectDungeon()
     return false
 end
 
+-- Shared function for manual save logic (used by both minimap and slash command)
+function MPT.PerformManualSave(source)
+    print("|cff00ffaa[StormsDungeonData]|r Manual save initiated (" .. (source or "unknown") .. ")...")
+    
+    -- Check combat tracking status
+    if MPT.CombatLog then
+        print("|cff00ffaa[StormsDungeonData]|r Combat tracking status: " .. (MPT.CombatLog.isTracking and "ACTIVE" or "INACTIVE"))
+        if MPT.CombatLog.playerStats then
+            local statsCount = 0
+            local hasData = false
+            for name, stats in pairs(MPT.CombatLog.playerStats) do
+                statsCount = statsCount + 1
+                if stats.damage > 0 or stats.healing > 0 or stats.interrupts > 0 then
+                    hasData = true
+                end
+            end
+            print("|cff00ffaa[StormsDungeonData]|r CombatLog has " .. statsCount .. " player entries, hasData=" .. tostring(hasData))
+        end
+    end
+    
+    -- If no CurrentRunData exists, try to detect from active keystone FIRST, then history
+    if not MPT.CurrentRunData then
+        -- Priority 1: Try to build from active keystone (if we're currently in a dungeon)
+        print("|cff00ffaa[StormsDungeonData]|r No pending run data, checking for active keystone...")
+        if MPT.Events and MPT.Events.BuildRunDataFromActiveKeystone then
+            local built = MPT.Events:BuildRunDataFromActiveKeystone()
+            if built then
+                print("|cff00ffaa[StormsDungeonData]|r Successfully built run data from active keystone!")
+            else
+                print("|cff00ffaa[StormsDungeonData]|r No active keystone found, trying run history...")
+            end
+        end
+        
+        -- Priority 2: Try to reconstruct from C_MythicPlus.GetRunHistory()
+        if not MPT.CurrentRunData then
+            if not C_MythicPlus then
+                print("|cff00ffaa[StormsDungeonData]|r ERROR: C_MythicPlus API not available")
+                return false
+            end
+            if not C_MythicPlus.GetRunHistory then
+                print("|cff00ffaa[StormsDungeonData]|r ERROR: C_MythicPlus.GetRunHistory not available")
+                return false
+            end
+            
+                print("|cff00ffaa[StormsDungeonData]|r Attempting to reconstruct from run history...")
+            local runHistory = C_MythicPlus.GetRunHistory(false, true)
+            if runHistory and #runHistory > 0 then
+            -- Log all runs found for debugging
+            print("|cff00ffaa[StormsDungeonData]|r Found " .. #runHistory .. " runs in history:")
+            for i, run in ipairs(runHistory) do
+                local dungeonName = C_ChallengeMode.GetMapUIInfo(run.mapChallengeModeID)
+                local dateStr = "no date"
+                if run.completionDate then
+                    if type(run.completionDate) == "table" then
+                        dateStr = "table"
+                    elseif type(run.completionDate) == "number" then
+                        dateStr = tostring(run.completionDate)
+                    else
+                        dateStr = type(run.completionDate)
+                    end
+                end
+                print("  [" .. i .. "] " .. (dungeonName or "Unknown") .. " +" .. run.level .. " (completed=" .. tostring(run.completed) .. ", date=" .. dateStr .. ")")
+            end
+            
+            -- Find the most recent completed run by completionDate
+            print("|cff00ffaa[StormsDungeonData]|r Starting run selection logic...")
+            local latestRun = nil
+            local latestDate = 0
+            for i, run in ipairs(runHistory) do
+                print("|cff00ffaa[StormsDungeonData]|r Checking run #" .. i .. ", completed=" .. tostring(run.completed) .. ", hasDate=" .. tostring(run.completionDate ~= nil))
+                if run.completed then
+                    if run.completionDate then
+                        local runDate = run.completionDate
+                        local timestamp = 0
+                        if type(runDate) == "table" then
+                            local success, result = pcall(time, runDate)
+                            if success then
+                                if result then
+                                    timestamp = result
+                                    print("|cff00ffaa[StormsDungeonData]|r Run #" .. i .. " date table converted to timestamp: " .. timestamp)
+                                else
+                                    print("|cff00ffaa[StormsDungeonData]|r Run #" .. i .. " date table conversion returned nil")
+                                end
+                            else
+                                print("|cff00ffaa[StormsDungeonData]|r Run #" .. i .. " date table conversion FAILED: " .. tostring(result))
+                            end
+                        elseif type(runDate) == "number" then
+                            timestamp = runDate
+                            print("|cff00ffaa[StormsDungeonData]|r Run #" .. i .. " date number: " .. timestamp)
+                        end
+                        
+                        if timestamp > latestDate then
+                            latestDate = timestamp
+                            latestRun = run
+                            print("|cff00ffaa[StormsDungeonData]|r Run #" .. i .. " is now the latest (timestamp=" .. timestamp .. ")")
+                        end
+                    else
+                        print("|cff00ffaa[StormsDungeonData]|r Run #" .. i .. " has no completionDate")
+                    end
+                else
+                    print("|cff00ffaa[StormsDungeonData]|r Run #" .. i .. " is not completed")
+                end
+            end
+            
+            print("|cff00ffaa[StormsDungeonData]|r Selection complete. latestRun=" .. tostring(latestRun ~= nil) .. ", latestDate=" .. latestDate)
+            
+            -- Fallback to last completed run if no dates available
+            if not latestRun then
+                print("|cff00ffaa[StormsDungeonData]|r No completion dates found, searching for last completed run...")
+                for i = #runHistory, 1, -1 do
+                    if runHistory[i].completed then
+                        latestRun = runHistory[i]
+                        print("|cff00ffaa[StormsDungeonData]|r Using last completed run in array: #" .. i)
+                        break
+                    end
+                end
+            end
+            
+            if latestRun then
+                local dungeonName = C_ChallengeMode.GetMapUIInfo(latestRun.mapChallengeModeID)
+                print("|cff00ffaa[StormsDungeonData]|r Reconstructing from history: " .. (dungeonName or "Unknown") .. " +" .. latestRun.level .. " (mapID=" .. latestRun.mapChallengeModeID .. ")")
+                
+                if MPT.Events and MPT.Events.ReconstructRunDataFromHistory then
+                    MPT.Events:ReconstructRunDataFromHistory(latestRun)
+                    if MPT.CurrentRunData then
+                        print("|cff00ffaa[StormsDungeonData]|r Reconstructed: " .. tostring(MPT.CurrentRunData.dungeonName) .. " +" .. tostring(MPT.CurrentRunData.keystoneLevel) .. ", mapID=" .. tostring(MPT.CurrentRunData.mapID or MPT.CurrentRunData.dungeonID))
+                        
+                        -- Validate reconstructed data
+                        if not MPT.CurrentRunData.dungeonID or MPT.CurrentRunData.dungeonID == 0 then
+                            print("|cffff4444[StormsDungeonData]|r ERROR: Reconstructed data has invalid dungeonID, clearing CurrentRunData")
+                            MPT.CurrentRunData = nil
+                        end
+                    else
+                        print("|cffff4444[StormsDungeonData]|r ERROR: ReconstructRunDataFromHistory failed to create CurrentRunData")
+                    end
+                end
+            else
+                print("|cff00ffaa[StormsDungeonData]|r No completed runs found in history")
+            end
+        else
+            print("|cff00ffaa[StormsDungeonData]|r No recent runs found in history")
+        end
+        end  -- Close the if runHistory block
+    end  -- Close the if not MPT.CurrentRunData block
+    
+    -- If CurrentRunData still doesn't exist, try calling OnChallengeModeCompleted
+    if not MPT.CurrentRunData and MPT.Events and MPT.Events.OnChallengeModeCompleted then
+        print("|cff00ffaa[StormsDungeonData]|r Attempting to detect completion...")
+        MPT.Events:OnChallengeModeCompleted()
+    end
+    
+    local saved = false
+    if MPT.Events and MPT.Events.FinalizeRun then
+        saved = MPT.Events:FinalizeRun("manual") or false
+    end
+    if saved then
+        print("|cff00ffaa[StormsDungeonData]|r Run saved manually!")
+        return true
+    else
+        print("|cff00ffaa[StormsDungeonData]|r No pending run to save - try /sdd test or /sdd force")
+        if C_ChallengeMode and C_ChallengeMode.GetCompletionInfo then
+            local completionInfo = C_ChallengeMode.GetCompletionInfo()
+            if completionInfo then
+                print("|cff00ffaa[StormsDungeonData]|r DEBUG: GetCompletionInfo returned data but CurrentRunData was not created")
+            else
+                print("|cff00ffaa[StormsDungeonData]|r DEBUG: GetCompletionInfo returned nil - no completion detected")
+            end
+        end
+        return false
+    end
+end
+
 function MPT.UI:Initialize()
     -- Modules are loaded via the .toc file in order; don't overwrite them here.
     -- Just ensure tables exist so later calls don't hard error.
@@ -127,20 +299,7 @@ function MPT.UI:Initialize()
     
     local function OnMinimapClick(_, button)
         if button == "RightButton" then
-            if not IsPlayerInCorrectDungeon() then
-                print("|cff00ffaa[StormsDungeonData]|r Manual save only allowed inside the dungeon you just completed")
-                return
-            end
-            local saved = false
-            if MPT.Events and MPT.Events.FinalizeRun then
-                saved = MPT.Events:FinalizeRun("manual") or false
-            end
-            if saved then
-                -- Scoreboard is shown by FinalizeRun when autoShow is enabled
-                -- If disabled, we could show it here explicitly with MPT.UI:ShowScoreboard(MPT.LastSavedRun)
-            else
-                print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
-            end
+            MPT.PerformManualSave("minimap")
         else
             MPT.HistoryViewer:Show()
         end
@@ -196,69 +355,7 @@ local function HandleSlashCommand(msg, editbox)
     if cmd == "history" or cmd == "h" then
         MPT.HistoryViewer:Show()
     elseif cmd == "save" or cmd == "force" then
-        -- If no CurrentRunData exists, try to detect and reconstruct from C_MythicPlus.GetRunHistory()
-        if not MPT.CurrentRunData and C_MythicPlus and C_MythicPlus.GetRunHistory then
-            print("|cff00ffaa[StormsDungeonData]|r No pending run data, attempting to reconstruct from run history...")
-            local runHistory = C_MythicPlus.GetRunHistory(false, true) -- (includePracticeRuns, includeCurrentSeason)
-            if runHistory and #runHistory > 0 then
-                -- Log all runs found for debugging
-                print("|cff00ffaa[StormsDungeonData]|r Found " .. #runHistory .. " runs in history:")
-                for i, run in ipairs(runHistory) do
-                    local dungeonName = C_ChallengeMode.GetMapUIInfo(run.mapChallengeModeID)
-                    print("  [" .. i .. "] " .. (dungeonName or "Unknown") .. " +" .. run.level .. " (completed=" .. tostring(run.completed) .. ")")
-                end
-                
-                -- Always use the LAST completed run in the array (most recent)
-                local latestRun = nil
-                for i = #runHistory, 1, -1 do
-                    local run = runHistory[i]
-                    if run.completed then
-                        latestRun = run
-                        break
-                    end
-                end
-                
-                if latestRun then
-                    local dungeonName = C_ChallengeMode.GetMapUIInfo(latestRun.mapChallengeModeID)
-                    print("|cff00ffaa[StormsDungeonData]|r Using most recent run: " .. (dungeonName or "Unknown") .. " +" .. latestRun.level)
-                    
-                    -- Reconstruct CurrentRunData from run history
-                    if MPT.Events and MPT.Events.ReconstructRunDataFromHistory then
-                        MPT.Events:ReconstructRunDataFromHistory(latestRun)
-                    end
-                else
-                    print("|cff00ffaa[StormsDungeonData]|r No completed runs found in history")
-                end
-            else
-                print("|cff00ffaa[StormsDungeonData]|r No recent runs found in history")
-            end
-        end
-        
-        -- If CurrentRunData still doesn't exist, try calling OnChallengeModeCompleted
-        if not MPT.CurrentRunData and MPT.Events and MPT.Events.OnChallengeModeCompleted then
-            print("|cff00ffaa[StormsDungeonData]|r Attempting to detect completion...")
-            MPT.Events:OnChallengeModeCompleted()
-        end
-        
-        local saved = false
-        if MPT.Events and MPT.Events.FinalizeRun then
-            saved = MPT.Events:FinalizeRun("manual") or false
-        end
-        if saved then
-            -- Scoreboard is shown by FinalizeRun when autoShow is enabled
-            -- If disabled, we could show it here explicitly with MPT.UI:ShowScoreboard(MPT.LastSavedRun)
-            print("|cff00ffaa[StormsDungeonData]|r Run saved manually!")
-        else
-            print("|cff00ffaa[StormsDungeonData]|r No pending run to save - try /sdd test or /sdd force")
-            if C_ChallengeMode and C_ChallengeMode.GetCompletionInfo then
-                local completionInfo = C_ChallengeMode.GetCompletionInfo()
-                if completionInfo then
-                    print("|cff00ffaa[StormsDungeonData]|r DEBUG: GetCompletionInfo returned data but CurrentRunData was not created")
-                else
-                    print("|cff00ffaa[StormsDungeonData]|r DEBUG: GetCompletionInfo returned nil - no completion detected")
-                end
-            end
-        end
+        MPT.PerformManualSave("slash command")
     elseif cmd == "reset" then
         StormsDungeonDataDB = MPT.Database:CreateDefaultDB()
         print("|cff00ffaa[StormsDungeonData]|r Database reset!")
@@ -283,6 +380,12 @@ local function HandleSlashCommand(msg, editbox)
         print("  Event frame exists: " .. tostring(MPT.Events and MPT.Events.frame ~= nil))
         if MPT.Events and MPT.Events.frame then
             print("  Frame registered for events: true")
+            
+            -- Check if frame is registered for CHALLENGE_MODE_COMPLETED
+            local frame = MPT.Events.frame
+            print("  Frame name: " .. tostring(frame:GetName() or "anonymous"))
+            print("  Frame is shown: " .. tostring(frame:IsShown()))
+            
             -- Try to manually check C_ChallengeMode
             if C_ChallengeMode and C_ChallengeMode.GetActiveChallengeMapID then
                 local mapID = C_ChallengeMode.GetActiveChallengeMapID()
