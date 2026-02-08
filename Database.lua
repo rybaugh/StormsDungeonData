@@ -9,6 +9,9 @@ function MPT.Database:CreateDefaultDB()
         version = 1,
         runs = {},  -- List of all runs across all characters
         characters = {},  -- Character metadata
+        playerRatings = {},  -- [playerNameKey] = "good" | "bad" (for non-user players in runs)
+        playerRatingGoodCount = {},  -- [playerNameKey] = number of times rated good
+        playerRatingBadCount = {},   -- [playerNameKey] = number of times rated bad
         settings = {
             autoShowScoreboard = true,
         },
@@ -31,8 +34,90 @@ function MPT.Database:Initialize()
     if not StormsDungeonDataDB.settings then
         StormsDungeonDataDB.settings = {}
     end
+    if not StormsDungeonDataDB.playerRatings then
+        StormsDungeonDataDB.playerRatings = {}
+    end
+    if not StormsDungeonDataDB.playerRatingGoodCount then
+        StormsDungeonDataDB.playerRatingGoodCount = {}
+    end
+    if not StormsDungeonDataDB.playerRatingBadCount then
+        StormsDungeonDataDB.playerRatingBadCount = {}
+    end
     
     print("|cff00ffaa[StormsDungeonData]|r Database initialized")
+end
+
+function MPT.Database:GetPlayerGoodCount(playerName)
+    if not StormsDungeonDataDB or not StormsDungeonDataDB.playerRatingGoodCount then return 0 end
+    local key = self:GetPlayerRatingKey(playerName)
+    if not key then return 0 end
+    local n = StormsDungeonDataDB.playerRatingGoodCount[key]
+    return (type(n) == "number" and n > 0) and n or 0
+end
+
+function MPT.Database:IncrementPlayerGoodCount(playerName)
+    if not StormsDungeonDataDB then return false end
+    if not StormsDungeonDataDB.playerRatingGoodCount then
+        StormsDungeonDataDB.playerRatingGoodCount = {}
+    end
+    local key = self:GetPlayerRatingKey(playerName)
+    if not key then return false end
+    local n = StormsDungeonDataDB.playerRatingGoodCount[key] or 0
+    StormsDungeonDataDB.playerRatingGoodCount[key] = n + 1
+    return true
+end
+
+function MPT.Database:GetPlayerBadCount(playerName)
+    if not StormsDungeonDataDB or not StormsDungeonDataDB.playerRatingBadCount then return 0 end
+    local key = self:GetPlayerRatingKey(playerName)
+    if not key then return 0 end
+    local n = StormsDungeonDataDB.playerRatingBadCount[key]
+    return (type(n) == "number" and n > 0) and n or 0
+end
+
+function MPT.Database:IncrementPlayerBadCount(playerName)
+    if not StormsDungeonDataDB then return false end
+    if not StormsDungeonDataDB.playerRatingBadCount then
+        StormsDungeonDataDB.playerRatingBadCount = {}
+    end
+    local key = self:GetPlayerRatingKey(playerName)
+    if not key then return false end
+    local n = StormsDungeonDataDB.playerRatingBadCount[key] or 0
+    StormsDungeonDataDB.playerRatingBadCount[key] = n + 1
+    return true
+end
+
+-- Normalize player name for rating key (case-insensitive, full name-realm)
+function MPT.Database:GetPlayerRatingKey(playerName)
+    if not playerName or type(playerName) ~= "string" then return nil end
+    local name = playerName:gsub("%s+", ""):lower()
+    if name == "" then return nil end
+    -- If no realm suffix, append current realm so same-name on different realms don't collide
+    if not name:match("%-") and GetRealmName then
+        name = name .. "-" .. (GetRealmName() or ""):gsub("%s+", ""):lower()
+    end
+    return name
+end
+
+function MPT.Database:GetPlayerRating(playerName)
+    if not StormsDungeonDataDB or not StormsDungeonDataDB.playerRatings then return nil end
+    local key = self:GetPlayerRatingKey(playerName)
+    return key and StormsDungeonDataDB.playerRatings[key] or nil
+end
+
+function MPT.Database:SetPlayerRating(playerName, rating)
+    if not StormsDungeonDataDB then return false end
+    if not StormsDungeonDataDB.playerRatings then
+        StormsDungeonDataDB.playerRatings = {}
+    end
+    local key = self:GetPlayerRatingKey(playerName)
+    if not key then return false end
+    if rating == "good" or rating == "bad" then
+        StormsDungeonDataDB.playerRatings[key] = rating
+        return true
+    end
+    StormsDungeonDataDB.playerRatings[key] = nil
+    return true
 end
 
 -- Create a new run record

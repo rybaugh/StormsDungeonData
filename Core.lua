@@ -14,6 +14,7 @@ MPT.Utils = MPT.Utils or {}
 MPT.Events = MPT.Events or {}
 MPT.DamageMeterCompat = MPT.DamageMeterCompat or {}
 MPT.CombatLog = MPT.CombatLog or {}
+MPT.CombatLogFileMonitor = MPT.CombatLogFileMonitor or {}
 MPT.UI = MPT.UI or {}
 
 -- Settings
@@ -43,6 +44,11 @@ function MPT:Initialize()
     self.Events:Initialize()
     self.CombatLog:Initialize()
     self.UI:Initialize()
+    
+    -- Initialize combat log file monitor for auto-detection
+    if self.CombatLogFileMonitor and self.CombatLogFileMonitor.Initialize then
+        self.CombatLogFileMonitor:Initialize()
+    end
     
     print("|cff00ffaaType /sdd for options|r")
 end

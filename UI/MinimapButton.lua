@@ -69,6 +69,10 @@ SDDMinimapButtonMixin = {}
 
 local function OnMinimapClick(_, button)
     if button == "RightButton" then
+        -- Close history so only the scoreboard shows after save
+        if MPT and MPT.HistoryViewer and MPT.HistoryViewer.Hide then
+            MPT.HistoryViewer:Hide()
+        end
         if MPT and MPT.PerformManualSave then
             MPT.PerformManualSave("minimap")
         elseif MPT and MPT.Events and MPT.Events.FinalizeRun then
@@ -78,6 +82,10 @@ local function OnMinimapClick(_, button)
             end
         end
     else
+        -- Close scoreboard so only history shows
+        if MPT and MPT.Scoreboard and MPT.Scoreboard.Hide then
+            MPT.Scoreboard:Hide()
+        end
         if MPT and MPT.HistoryViewer and MPT.HistoryViewer.Show then
             MPT.HistoryViewer:Show()
         end
@@ -222,6 +230,9 @@ function SDDMinimapButtonMixin:OnLoad()
 
     self:SetScript("OnClick", function(_, button)
         if button == "RightButton" then
+            if MPT and MPT.HistoryViewer and MPT.HistoryViewer.Hide then
+                MPT.HistoryViewer:Hide()
+            end
             if MPT and MPT.PerformManualSave then
                 MPT.PerformManualSave("minimap")
             elseif MPT and MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
@@ -232,6 +243,9 @@ function SDDMinimapButtonMixin:OnLoad()
                 print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
             end
         else
+            if MPT and MPT.Scoreboard and MPT.Scoreboard.Hide then
+                MPT.Scoreboard:Hide()
+            end
             if MPT and MPT.HistoryViewer and MPT.HistoryViewer.Show then
                 MPT.HistoryViewer:Show()
             end

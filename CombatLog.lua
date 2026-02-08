@@ -10,7 +10,14 @@ local function NormalizeUnitName(name)
     if type(name) ~= "string" then
         return nil
     end
-    -- Strip realm suffix if present (e.g. Name-Realm)
+    -- Check if name has a realm suffix (e.g., "Name-Realm")
+    -- If no realm suffix, it's likely a pet - return nil to ignore it
+    local hasRealm = name:match("^[^%-]+%-[^%-]+$")
+    if not hasRealm then
+        -- No realm suffix = pet name, ignore it
+        return nil
+    end
+    -- Strip realm suffix if present (e.g. Name-Realm -> Name)
     local short = name:match("^([^%-]+)%-")
     return short or name
 end
@@ -63,17 +70,18 @@ function CombatLog:StartTracking()
             local name = UnitName(unitID)
             local shortName = NormalizeUnitName(name) or name
             local guid = UnitGUID(unitID)
-            if guid and name then
+            -- Only track if we got a valid name (not nil from NormalizeUnitName)
+            if guid and name and shortName then
                 self.playerGUIDToName[guid] = shortName
+                self.playerStats[shortName] = {
+                    damage = 0,
+                    healing = 0,
+                    interrupts = 0,
+                    deaths = 0,
+                    damageEvents = 0,
+                    healingEvents = 0,
+                }
             end
-            self.playerStats[shortName] = {
-                damage = 0,
-                healing = 0,
-                interrupts = 0,
-                deaths = 0,
-                damageEvents = 0,
-                healingEvents = 0,
-            }
         end
     end
     
@@ -82,15 +90,15 @@ function CombatLog:StartTracking()
     local playerGUID = UnitGUID("player")
     if playerGUID and playerShortName then
         self.playerGUIDToName[playerGUID] = playerShortName
+        self.playerStats[playerShortName] = {
+            damage = 0,
+            healing = 0,
+            interrupts = 0,
+            deaths = 0,
+            damageEvents = 0,
+            healingEvents = 0,
+        }
     end
-    self.playerStats[playerShortName] = {
-        damage = 0,
-        healing = 0,
-        interrupts = 0,
-        deaths = 0,
-        damageEvents = 0,
-        healingEvents = 0,
-    }
     
     print("|cff00ffaa[StormsDungeonData]|r Combat tracking started")
     
@@ -110,6 +118,50 @@ function CombatLog:StopTracking()
     end
     
     print("|cff00ffaa[StormsDungeonData]|r Combat tracking stopped")
+end
+
+-- Get list of players who were actually in the M+ run based on combat activity
+function CombatLog:GetValidatedPlayerNames()
+    local validPlayers = {}
+    
+    -- Use playerStats - these are all players who had combat activity during tracking
+    -- Pets are already filtered out by NormalizeUnitName returning nil
+    if self.playerStats then
+        for name, stats in pairs(self.playerStats) do
+            if type(name) == "string" and name ~= "" then
+                -- Include any player who had ANY combat activity
+                local hasActivity = (stats.damage and stats.damage > 0) 
+                                 or (stats.healing and stats.healing > 0) 
+                                 or (stats.interrupts and stats.interrupts > 0)
+                                 or (stats.damageEvents and stats.damageEvents > 0)
+                                 or (stats.healingEvents and stats.healingEvents > 0)
+                                 or (stats.deaths and stats.deaths > 0)
+                
+                if hasActivity then
+                    validPlayers[name] = true
+                end
+            end
+        end
+    end
+    
+    local count = 0
+    for _ in pairs(validPlayers) do count = count + 1 end
+    print("|cff00ffaa[StormsDungeonData]|r Combat log tracked " .. count .. " players with activity")
+    
+    -- Return as a table for easy lookup
+    return validPlayers
+end
+
+-- Check if a player was actually in the dungeon based on combat log
+function CombatLog:IsValidPlayer(playerName)
+    if not playerName or playerName == "" then
+        return false
+    end
+    
+    local normalizedName = NormalizeUnitName(playerName) or playerName
+    local validPlayers = self:GetValidatedPlayerNames()
+    
+    return validPlayers[normalizedName] == true or validPlayers[playerName] == true
 end
 
 function CombatLog:PrepareNewAPIData()
@@ -136,23 +188,11 @@ function CombatLog:FinalizeNewAPIData()
     end
     if damageData then
         for playerName, stats in pairs(damageData) do
-            local shortName = NormalizeUnitName(playerName) or playerName
-            if not self.playerStats[playerName] then
-                self.playerStats[playerName] = {
-                    damage = 0,
-                    healing = 0,
-                    interrupts = 0,
-                    deaths = 0,
-                    damageEvents = 0,
-                    healingEvents = 0,
-                }
-            end
-            self.playerStats[playerName].damage = stats.damage
-            self.playerStats[playerName].damageEvents = 1  -- Placeholder
-
-            if shortName ~= playerName then
-                if not self.playerStats[shortName] then
-                    self.playerStats[shortName] = {
+            local shortName = NormalizeUnitName(playerName)
+            if shortName then
+                -- Only include names with realm (players); no realm = pet, skip
+                if not self.playerStats[playerName] then
+                    self.playerStats[playerName] = {
                         damage = 0,
                         healing = 0,
                         interrupts = 0,
@@ -161,8 +201,23 @@ function CombatLog:FinalizeNewAPIData()
                         healingEvents = 0,
                     }
                 end
-                self.playerStats[shortName].damage = stats.damage
-                self.playerStats[shortName].damageEvents = 1
+                self.playerStats[playerName].damage = stats.damage
+                self.playerStats[playerName].damageEvents = 1  -- Placeholder
+
+                if shortName ~= playerName then
+                    if not self.playerStats[shortName] then
+                        self.playerStats[shortName] = {
+                            damage = 0,
+                            healing = 0,
+                            interrupts = 0,
+                            deaths = 0,
+                            damageEvents = 0,
+                            healingEvents = 0,
+                        }
+                    end
+                    self.playerStats[shortName].damage = stats.damage
+                    self.playerStats[shortName].damageEvents = 1
+                end
             end
         end
     end
@@ -174,23 +229,10 @@ function CombatLog:FinalizeNewAPIData()
     end
     if healingData then
         for playerName, stats in pairs(healingData) do
-            local shortName = NormalizeUnitName(playerName) or playerName
-            if not self.playerStats[playerName] then
-                self.playerStats[playerName] = {
-                    damage = 0,
-                    healing = 0,
-                    interrupts = 0,
-                    deaths = 0,
-                    damageEvents = 0,
-                    healingEvents = 0,
-                }
-            end
-            self.playerStats[playerName].healing = stats.healing
-            self.playerStats[playerName].healingEvents = 1  -- Placeholder
-
-            if shortName ~= playerName then
-                if not self.playerStats[shortName] then
-                    self.playerStats[shortName] = {
+            local shortName = NormalizeUnitName(playerName)
+            if shortName then
+                if not self.playerStats[playerName] then
+                    self.playerStats[playerName] = {
                         damage = 0,
                         healing = 0,
                         interrupts = 0,
@@ -199,8 +241,23 @@ function CombatLog:FinalizeNewAPIData()
                         healingEvents = 0,
                     }
                 end
-                self.playerStats[shortName].healing = stats.healing
-                self.playerStats[shortName].healingEvents = 1
+                self.playerStats[playerName].healing = stats.healing
+                self.playerStats[playerName].healingEvents = 1  -- Placeholder
+
+                if shortName ~= playerName then
+                    if not self.playerStats[shortName] then
+                        self.playerStats[shortName] = {
+                            damage = 0,
+                            healing = 0,
+                            interrupts = 0,
+                            deaths = 0,
+                            damageEvents = 0,
+                            healingEvents = 0,
+                        }
+                    end
+                    self.playerStats[shortName].healing = stats.healing
+                    self.playerStats[shortName].healingEvents = 1
+                end
             end
         end
     end
@@ -212,22 +269,10 @@ function CombatLog:FinalizeNewAPIData()
     end
     if interruptData then
         for playerName, stats in pairs(interruptData) do
-            local shortName = NormalizeUnitName(playerName) or playerName
-            if not self.playerStats[playerName] then
-                self.playerStats[playerName] = {
-                    damage = 0,
-                    healing = 0,
-                    interrupts = 0,
-                    deaths = 0,
-                    damageEvents = 0,
-                    healingEvents = 0,
-                }
-            end
-            self.playerStats[playerName].interrupts = stats.interrupts
-
-            if shortName ~= playerName then
-                if not self.playerStats[shortName] then
-                    self.playerStats[shortName] = {
+            local shortName = NormalizeUnitName(playerName)
+            if shortName then
+                if not self.playerStats[playerName] then
+                    self.playerStats[playerName] = {
                         damage = 0,
                         healing = 0,
                         interrupts = 0,
@@ -236,7 +281,21 @@ function CombatLog:FinalizeNewAPIData()
                         healingEvents = 0,
                     }
                 end
-                self.playerStats[shortName].interrupts = stats.interrupts
+                self.playerStats[playerName].interrupts = stats.interrupts
+
+                if shortName ~= playerName then
+                    if not self.playerStats[shortName] then
+                        self.playerStats[shortName] = {
+                            damage = 0,
+                            healing = 0,
+                            interrupts = 0,
+                            deaths = 0,
+                            damageEvents = 0,
+                            healingEvents = 0,
+                        }
+                    end
+                    self.playerStats[shortName].interrupts = stats.interrupts
+                end
             end
         end
     end
@@ -309,13 +368,20 @@ function CombatLog:OnUnitDeath(guid, name, flags)
     if not name then
         name = self.playerGUIDToName[guid]
     end
-    name = NormalizeUnitName(name) or name
+    
+    local normalizedName = NormalizeUnitName(name)
+    if not normalizedName then
+        -- No realm suffix = pet, ignore player death tracking
+        -- Continue to check if it's an NPC death though
+        normalizedName = name
+    end
 
-    -- Track player deaths
+    -- Track player deaths - only for players with realm suffix (not pets)
     local isPlayer = flags and (bit.band(flags, COMBATLOG_OBJECT_TYPE_PLAYER) == COMBATLOG_OBJECT_TYPE_PLAYER)
-    if isPlayer and name then
-        if not self.playerStats[name] then
-            self.playerStats[name] = {
+    if isPlayer and normalizedName then
+        -- Create entry if needed
+        if not self.playerStats[normalizedName] then
+            self.playerStats[normalizedName] = {
                 damage = 0,
                 healing = 0,
                 interrupts = 0,
@@ -324,7 +390,7 @@ function CombatLog:OnUnitDeath(guid, name, flags)
                 healingEvents = 0,
             }
         end
-        self.playerStats[name].deaths = (self.playerStats[name].deaths or 0) + 1
+        self.playerStats[normalizedName].deaths = (self.playerStats[normalizedName].deaths or 0) + 1
         return
     end
 
@@ -343,10 +409,15 @@ end
 function CombatLog:OnDamage(sourceName, amount)
     if not sourceName or not amount then return end
 
-    sourceName = NormalizeUnitName(sourceName) or sourceName
+    local normalizedName = NormalizeUnitName(sourceName)
+    if not normalizedName then
+        -- No realm suffix = pet, ignore
+        return
+    end
     
-    if not self.playerStats[sourceName] then
-        self.playerStats[sourceName] = {
+    -- Create player stats entry if it doesn't exist (for players with realm suffix)
+    if not self.playerStats[normalizedName] then
+        self.playerStats[normalizedName] = {
             damage = 0,
             healing = 0,
             interrupts = 0,
@@ -356,17 +427,22 @@ function CombatLog:OnDamage(sourceName, amount)
         }
     end
     
-    self.playerStats[sourceName].damage = self.playerStats[sourceName].damage + amount
-    self.playerStats[sourceName].damageEvents = self.playerStats[sourceName].damageEvents + 1
+    self.playerStats[normalizedName].damage = self.playerStats[normalizedName].damage + amount
+    self.playerStats[normalizedName].damageEvents = self.playerStats[normalizedName].damageEvents + 1
 end
 
 function CombatLog:OnHealing(sourceName, amount)
     if not sourceName or not amount then return end
 
-    sourceName = NormalizeUnitName(sourceName) or sourceName
+    local normalizedName = NormalizeUnitName(sourceName)
+    if not normalizedName then
+        -- No realm suffix = pet, ignore
+        return
+    end
     
-    if not self.playerStats[sourceName] then
-        self.playerStats[sourceName] = {
+    -- Create player stats entry if it doesn't exist (for players with realm suffix)
+    if not self.playerStats[normalizedName] then
+        self.playerStats[normalizedName] = {
             damage = 0,
             healing = 0,
             interrupts = 0,
@@ -376,17 +452,22 @@ function CombatLog:OnHealing(sourceName, amount)
         }
     end
     
-    self.playerStats[sourceName].healing = self.playerStats[sourceName].healing + amount
-    self.playerStats[sourceName].healingEvents = self.playerStats[sourceName].healingEvents + 1
+    self.playerStats[normalizedName].healing = self.playerStats[normalizedName].healing + amount
+    self.playerStats[normalizedName].healingEvents = self.playerStats[normalizedName].healingEvents + 1
 end
 
 function CombatLog:OnInterrupt(sourceName)
     if not sourceName then return end
 
-    sourceName = NormalizeUnitName(sourceName) or sourceName
+    local normalizedName = NormalizeUnitName(sourceName)
+    if not normalizedName then
+        -- No realm suffix = pet, ignore
+        return
+    end
     
-    if not self.playerStats[sourceName] then
-        self.playerStats[sourceName] = {
+    -- Create player stats entry if it doesn't exist (for players with realm suffix)
+    if not self.playerStats[normalizedName] then
+        self.playerStats[normalizedName] = {
             damage = 0,
             healing = 0,
             interrupts = 0,
@@ -396,7 +477,7 @@ function CombatLog:OnInterrupt(sourceName)
         }
     end
     
-    self.playerStats[sourceName].interrupts = self.playerStats[sourceName].interrupts + 1
+    self.playerStats[normalizedName].interrupts = self.playerStats[normalizedName].interrupts + 1
 end
 
 function CombatLog:GetPlayerStats(name)

@@ -202,6 +202,19 @@ function DamageMeterCompat:GetDamageData()
         print("|cff00ffaa[StormsDungeonData]|r Warning: Combat data restricted by Blizzard")
         return nil
     end
+    
+    -- List all available combat sessions
+    if C_DamageMeter and C_DamageMeter.GetAvailableCombatSessions then
+        local sessions = C_DamageMeter.GetAvailableCombatSessions()
+        if sessions and #sessions > 0 then
+            print("|cff00ffaa[StormsDungeonData]|r Available combat sessions: " .. #sessions)
+            for i, session in ipairs(sessions) do
+                print("|cff00ffaa[StormsDungeonData]|r   Session #" .. i .. ": ID=" .. tostring(session.sessionID) .. ", Name='" .. tostring(session.name) .. "', Duration=" .. tostring(session.durationSeconds) .. "s")
+            end
+        else
+            print("|cffff4444[StormsDungeonData]|r No combat sessions available from C_DamageMeter")
+        end
+    end
 
     local damageDoneSession
     if C_DamageMeter and C_DamageMeter.GetCombatSessionFromType and Enum and Enum.DamageMeterSessionType then

@@ -25,6 +25,14 @@ local function NormalizeUnitName(name)
     return short or name
 end
 
+-- True if name has a realm suffix (Name-Realm); names without realm are assumed pets
+local function NameHasRealm(name)
+    if type(name) ~= "string" or name == "" then
+        return false
+    end
+    return name:match("^[^%-]+%-[^%-]+$") ~= nil
+end
+
 local function GetDetailsSegmentCount(details)
     if not details then
         return 0
@@ -285,6 +293,18 @@ local function GetDungeonNameFromMapID(mapID)
             return name.name
         end
     end
+end
+
+-- Returns time limit in seconds for the dungeon, or nil (Details: dungeonName, id, timeLimit, texture, backgroundTexture, instanceMapId)
+local function GetDungeonTimeLimitSeconds(mapID)
+    if not mapID or not C_ChallengeMode or type(C_ChallengeMode.GetMapUIInfo) ~= "function" then
+        return nil
+    end
+    local _, _, timeLimit = C_ChallengeMode.GetMapUIInfo(mapID)
+    if timeLimit and timeLimit > 0 and timeLimit < 100000 then
+        return timeLimit
+    end
+    return nil
 end
 
 local function NormalizeDurationSeconds(duration)
@@ -608,6 +628,16 @@ local function CollectGroupPlayerStats()
     local playerName = UnitName("player")
     local playerClass = select(2, UnitClass("player"))
     local playerRole = UnitGroupRolesAssigned("player")
+    if not playerRole or playerRole == "" or playerRole == "NONE" then
+        -- Fall back to spec role (what they're actually playing) when no group role is set
+        local specIndex = GetSpecialization and GetSpecialization() or nil
+        if specIndex and GetSpecializationInfo then
+            local _, _, _, _, specRole = GetSpecializationInfo(specIndex)
+            if specRole == "TANK" or specRole == "HEALER" or specRole == "DAMAGER" then
+                playerRole = specRole
+            end
+        end
+    end
     table.insert(playerStats, MPT.Database:CreatePlayerStats("player", playerName, playerClass, playerRole))
 
     return playerStats
@@ -659,15 +689,51 @@ function Events:BuildRunDataFromActiveKeystone()
         mapID = C_ChallengeMode.GetActiveChallengeMapID()
     end
 
-    level = completionLevel or level
+    -- Prefer completion API level; then level captured at CHALLENGE_MODE_START (avoids using post-run "active" key, e.g. +8 after a +12)
+    local startLevel = (MPT.MythicPlusKeystoneLevel and (not mapID or MPT.MythicPlusMapID == mapID)) and MPT.MythicPlusKeystoneLevel or nil
+    level = completionLevel or startLevel or level
+    -- When we have no completion and no start level, "level" is from GetActiveKeystoneInfo (post-run key, e.g. +8). Prefer run history for this map.
+    if mapID and (not completionLevel and not startLevel) and C_MythicPlus and type(C_MythicPlus.GetRunHistory) == "function" then
+        local runHistory = C_MythicPlus.GetRunHistory(false, true)
+        if runHistory then
+            for i = 1, #runHistory do
+                local r = runHistory[i]
+                if r and r.completed and r.mapChallengeModeID == mapID and r.level and r.level > 0 then
+                    level = r.level
+                    print("|cff00ffaa[StormsDungeonData]|r Using keystone level from run history: +" .. tostring(level) .. " (avoids post-run active key)")
+                    break
+                end
+            end
+        end
+    end
     keystoneUpgrades = completionKeystoneUpgrades or keystoneUpgrades
     
     -- Prefer Details duration if available, otherwise use completion time
     local durationSeconds = detailsDuration or NormalizeDurationSeconds(completionTime)
     print("|cff00ffaa[StormsDungeonData]|r Using duration: " .. tostring(durationSeconds) .. " (Details: " .. tostring(detailsDuration) .. ", Completion API: " .. tostring(completionTime) .. ")")
 
-    if not mapID or not level then
+    -- Validate mapID before proceeding (CRITICAL for save validation)
+    if not mapID or mapID == 0 then
+        print("|cffff4444[StormsDungeonData]|r ERROR: Cannot build run data - invalid mapID (" .. tostring(mapID) .. ")")
+        print("|cffff4444[StormsDungeonData]|r TIP: You must use /sdd force while in the dungeon or immediately after completion")
         return false
+    end
+    
+    if not level or level == 0 then
+        print("|cffff4444[StormsDungeonData]|r ERROR: Cannot build run data - invalid keystone level (" .. tostring(level) .. ")")
+        return false
+    end
+
+    -- Completed = within time limit (same logic as OnChallengeModeCompleted)
+    local runCompleted = true
+    local completionOnTime = completion and completion.onTime
+    if completionOnTime == false then
+        runCompleted = false
+    elseif completionOnTime ~= true and durationSeconds and durationSeconds > 0 then
+        local timeLimit = GetDungeonTimeLimitSeconds(mapID)
+        if timeLimit and durationSeconds > timeLimit then
+            runCompleted = false
+        end
     end
 
     -- Always use mapID for dungeon name to avoid getting current zone after teleporting out
@@ -693,7 +759,7 @@ function Events:BuildRunDataFromActiveKeystone()
         keystoneLevel = level,
         affixes = affixes,
         keystoneUpgrades = keystoneUpgrades,
-        completed = true,
+        completed = runCompleted,
         players = playerStats,
         startTime = startTime,
         completionTime = time(),
@@ -728,8 +794,10 @@ function Events:Initialize()
     -- Register for PLAYER_ENTERING_WORLD to detect leaving dungeon after completion
     self.frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 
-    -- Always listen to CLEU for deaths/mob kills; WoW 12+ uses C_DamageMeter for damage/healing/interrupt totals.
+    -- Always listen to CLEU for deaths/mob kills and ENCOUNTER_END (run completion from combat log).
     self.frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+    -- ENCOUNTER_END fires when a boss encounter ends (success=1 on kill); last boss in M+ = run complete.
+    self.frame:RegisterEvent("ENCOUNTER_END")
     
     -- Register for appropriate combat events based on WoW version
     if MPT.DamageMeterCompat.IsWoW12Plus then
@@ -746,8 +814,32 @@ function Events:Initialize()
         Events:OnEvent(event, ...)
     end)
     
+    -- Same trigger RaiderIO uses: when the game shows the completion banner, run completion + auto-save
+    local function HookCompletionBanner()
+        if type(TopBannerManager_Show) ~= "function" then
+            return false
+        end
+        if Events._bannerHooked then
+            return true
+        end
+        hooksecurefunc("TopBannerManager_Show", function()
+            if not MPT.InMythicPlus then
+                return
+            end
+            print("|cff00ffaa[StormsDungeonData]|r Completion banner shown (same trigger as RaiderIO) - running completion and auto-save")
+            Events:OnChallengeModeCompleted()
+            Events:ScheduleEndOfRunAutoSave("completion_banner")
+        end)
+        Events._bannerHooked = true
+        print("|cff00ffaa[StormsDungeonData]|r Hooked completion banner (TopBannerManager_Show) for run detection")
+        return true
+    end
+    if not HookCompletionBanner() and C_Timer and C_Timer.After then
+        C_Timer.After(2, HookCompletionBanner)
+    end
+    
     print("|cff00ffaa[StormsDungeonData]|r Events module initialized")
-    print("|cff00ffaa[StormsDungeonData]|r Registered for: CHALLENGE_MODE_COMPLETED, CHALLENGE_MODE_COMPLETED_REWARDS, CHALLENGE_MODE_START")
+    print("|cff00ffaa[StormsDungeonData]|r Registered for: CHALLENGE_MODE_COMPLETED, CHALLENGE_MODE_COMPLETED_REWARDS, CHALLENGE_MODE_START, ENCOUNTER_END, COMBAT_LOG_EVENT_UNFILTERED")
 end
 
 function Events:OnEvent(event, ...)
@@ -763,23 +855,33 @@ function Events:OnEvent(event, ...)
     local success, err = pcall(function()
         if event == "ADDON_LOADED" then
             local addonName = args[1]
-                if addonName == "StormsDungeonData" then
+            if addonName == "StormsDungeonData" then
                 MPT:Initialize()
             end
         elseif event == "PLAYER_ENTERING_WORLD" then
             self:OnPlayerEnteringWorld()
         elseif event == "CHALLENGE_MODE_COMPLETED" then
+            -- Same method as Details: CHALLENGE_MODE_COMPLETED + C_ChallengeMode.GetChallengeCompletionInfo()
+            -- in the same handler. Call API immediately (first thing) then build run and schedule save.
             print("|cff00ffaa[StormsDungeonData]|r === CHALLENGE_MODE_COMPLETED EVENT RECEIVED ===")
             self:OnChallengeModeCompleted()
+            self:ScheduleEndOfRunAutoSave("completed_event")
+            -- Next-frame retry in case completion API wasn't ready this frame (same event, no Details dependency)
+            C_Timer.After(0, function()
+                self:OnChallengeModeCompleted()
+                self:ScheduleEndOfRunAutoSave("completed_event_nextframe")
+            end)
         elseif event == "CHALLENGE_MODE_COMPLETED_REWARDS" then
             -- This event fires AFTER completion and includes all completion data as payload
             local mapID, medal, timeMS, money, rewards = args[1], args[2], args[3], args[4], args[5]
             print("|cff00ffaa[StormsDungeonData]|r === CHALLENGE_MODE_COMPLETED_REWARDS EVENT RECEIVED ===")
             print("|cff00ffaa[StormsDungeonData]|r Payload: mapID=" .. tostring(mapID) .. ", timeMS=" .. tostring(timeMS))
             
-            -- This is a very reliable event - trigger completion with slight delay for API to update
+            -- Trigger completion immediately, then schedule multiple auto-save attempts
+            -- (OnChallengeModeCompleted can populate CurrentRunData late via retries, so one 2s check often missed)
             C_Timer.After(0.1, function()
                 self:OnChallengeModeCompleted()
+                self:ScheduleEndOfRunAutoSave("rewards_event")
             end)
         elseif event == "CHALLENGE_MODE_START" then
             local mapID = args[1]
@@ -788,6 +890,43 @@ function Events:OnEvent(event, ...)
             MPT.InMythicPlus = true
             MPT.MythicPlusMapID = mapID
             MPT.LastEnemyForces = nil
+            -- Capture keystone level at start so we don't use post-completion "active" key (e.g. +8) for a +12 run
+            MPT.MythicPlusKeystoneLevel = nil
+            if C_ChallengeMode and type(C_ChallengeMode.GetActiveKeystoneInfo) == "function" then
+                local a, b, c, d, e, f = C_ChallengeMode.GetActiveKeystoneInfo()
+                local startLevel = nil
+                if type(a) == "table" then
+                    startLevel = a.level or a.keystoneLevel
+                else
+                    startLevel = a
+                end
+                if startLevel and startLevel > 0 then
+                    MPT.MythicPlusKeystoneLevel = startLevel
+                    print("|cff00ffaa[StormsDungeonData]|r Keystone level at start: +" .. tostring(MPT.MythicPlusKeystoneLevel))
+                end
+            end
+            
+            -- Start combat tracking
+            if MPT.CombatLog and MPT.CombatLog.StartTracking then
+                print("|cff00ffaa[StormsDungeonData]|r Starting combat tracking...")
+                MPT.CombatLog:StartTracking()
+                if MPT.CombatLog.isTracking then
+                    print("|cff00ffaa[StormsDungeonData]|r Combat tracking ACTIVE")
+                else
+                    print("|cffff4444[StormsDungeonData]|r WARNING: Combat tracking failed to start!")
+                end
+            end
+            
+            -- Notify the combat log file monitor about the dungeon start
+            if MPT.CombatLogFileMonitor and MPT.CombatLogFileMonitor.ProcessEvent then
+                local dungeonName = C_ChallengeMode.GetMapUIInfo(mapID)
+                MPT.CombatLogFileMonitor:ProcessEvent({
+                    event = "CHALLENGE_MODE_START",
+                    dungeonName = dungeonName or "Unknown",
+                    mapID = mapID,
+                    keystoneLevel = 0,  -- Level not available in this event
+                })
+            end
             
             -- Start periodic tracking of enemy forces (every 5 seconds)
             if not self.enemyForcesTracker then
@@ -849,8 +988,33 @@ function Events:OnEvent(event, ...)
             end
         elseif event == "LOOT_OPENED" then
             self:OnLootOpened()
+        elseif event == "ENCOUNTER_END" then
+            -- encounterID, encounterName, difficultyID, groupSize, success (1=kill, 0=wipe)
+            local encounterID, encounterName, difficultyID, groupSize, success = args[1], args[2], args[3], args[4], args[5]
+            if MPT.InMythicPlus and success == 1 then
+                print("|cff00ffaa[StormsDungeonData]|r ENCOUNTER_END (success=1) in M+ - triggering completion check")
+                C_Timer.After(0.5, function()
+                    self:OnChallengeModeCompleted()
+                    self:ScheduleEndOfRunAutoSave("encounter_end")
+                end)
+            end
         elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-            -- Use CombatLogGetCurrentEventInfo inside handler
+            -- Combat log: ENCOUNTER_END with success=1 also indicates boss kill (backup if ENCOUNTER_END event doesn't fire)
+            if MPT.InMythicPlus and CombatLogGetCurrentEventInfo then
+                local eventInfo = { CombatLogGetCurrentEventInfo() }
+                local subevent = eventInfo[2]
+                if subevent == "ENCOUNTER_END" then
+                    local successVal = eventInfo[16]  -- 12=encounterID, 13=name, 14=difficultyID, 15=groupSize, 16=success
+                    if successVal == 1 then
+                        print("|cff00ffaa[StormsDungeonData]|r CLEU ENCOUNTER_END (success=1) in M+ - triggering completion check")
+                        C_Timer.After(0.5, function()
+                            self:OnChallengeModeCompleted()
+                            self:ScheduleEndOfRunAutoSave("encounter_end_cleu")
+                        end)
+                    end
+                end
+            end
+            -- Use CombatLogGetCurrentEventInfo inside handler for stats
             MPT.CombatLog:OnCombatLogEvent()
         elseif event == "COMBAT_METRICS_SESSION_NEW" then
             -- WoW 12.0+ event
@@ -902,6 +1066,7 @@ function Events:OnPlayerEnteringWorld()
         if MPT.InMythicPlus then
             print("|cff00ffaa[StormsDungeonData]|r Was in mythic+, now left instance - checking for completed run...")
             MPT.InMythicPlus = false
+            MPT.MythicPlusKeystoneLevel = nil
             
             -- Stop enemy forces tracker
             if self.enemyForcesTracker then
@@ -961,8 +1126,40 @@ function Events:OnPlayerEnteringWorld()
     end
 end
 
+-- Schedule several delayed attempts to auto-save the completed run.
+-- OnChallengeModeCompleted can populate CurrentRunData late (e.g. after API retries), so a single 2s check often missed.
+function Events:ScheduleEndOfRunAutoSave(reason)
+    local delays = { 2, 5, 10 }
+    for _, delay in ipairs(delays) do
+        C_Timer.After(delay, function()
+            if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+                print("|cff00ffaa[StormsDungeonData]|r End-of-run auto-save triggered (" .. tostring(reason) .. ", " .. delay .. "s)")
+                Events:FinalizeRun(reason)
+            end
+        end)
+    end
+end
+
 function Events:OnChallengeModeCompleted()
-    print("|cff00ffaa[StormsDungeonData]|r CHALLENGE_MODE_COMPLETED event fired")
+    print("|cff00ffaa[StormsDungeonData]|r OnChallengeModeCompleted called")
+    
+    -- Try the comprehensive completion API first
+    if C_ChallengeMode and C_ChallengeMode.GetChallengeCompletionInfo then
+        local completionInfo = C_ChallengeMode.GetChallengeCompletionInfo()
+        if completionInfo and completionInfo.mapChallengeModeID and completionInfo.mapChallengeModeID > 0 then
+            print("|cff00ffaa[StormsDungeonData]|r GetChallengeCompletionInfo returned valid data:")
+            print("|cff00ffaa[StormsDungeonData]|r   mapID=" .. tostring(completionInfo.mapChallengeModeID) .. ", level=" .. tostring(completionInfo.level) .. ", time=" .. tostring(completionInfo.time) .. "ms")
+            print("|cff00ffaa[StormsDungeonData]|r   onTime=" .. tostring(completionInfo.onTime) .. ", upgrades=" .. tostring(completionInfo.keystoneUpgradeLevels))
+        else
+            print("|cffff4444[StormsDungeonData]|r GetChallengeCompletionInfo returned nil or invalid data")
+        end
+    end
+    
+    -- Check if challenge mode is active
+    if C_ChallengeMode and C_ChallengeMode.IsChallengeModeActive then
+        local isActive = C_ChallengeMode.IsChallengeModeActive()
+        print("|cff00ffaa[StormsDungeonData]|r IsChallengeModeActive: " .. tostring(isActive))
+    end
     
     -- Wrap in pcall for safety
     local success, err = pcall(function()
@@ -1008,7 +1205,7 @@ function Events:OnChallengeModeCompleted()
             return
         end
 
-    local completion = GetCompletionInfoCompat()
+        local completion = GetCompletionInfoCompat()
     local completionMapID = completion and completion.mapID or nil
     local completionLevel = completion and completion.level or nil
     local completionTime = completion and completion.time or nil
@@ -1034,7 +1231,9 @@ function Events:OnChallengeModeCompleted()
         mapID = C_ChallengeMode.GetActiveChallengeMapID()
     end
 
-    level = completionLevel or level
+    -- Prefer completion API level; then level captured at CHALLENGE_MODE_START (avoids using post-run "active" key, e.g. +8 after a +12)
+    local startLevel = (MPT.MythicPlusKeystoneLevel and (not mapID or MPT.MythicPlusMapID == mapID)) and MPT.MythicPlusKeystoneLevel or nil
+    level = completionLevel or startLevel or level
     keystoneUpgrades = completionKeystoneUpgrades or keystoneUpgrades
     local durationSeconds = NormalizeDurationSeconds(completionTime)
     
@@ -1047,7 +1246,20 @@ function Events:OnChallengeModeCompleted()
     local oldDungeonScore = completion and completion.oldOverallDungeonScore
     local newDungeonScore = completion and completion.newOverallDungeonScore
     
-    print("|cff00ffaa[StormsDungeonData]|r Completion info: mapID=" .. tostring(mapID) .. ", level=" .. tostring(level) .. ", time=" .. tostring(durationSeconds) .. "s, onTime=" .. tostring(onTime))
+    -- Completed = within time limit. Use API onTime when present; else compare duration to dungeon time limit.
+    local runCompleted = true
+    if onTime == false then
+        runCompleted = false
+        print("|cff00ffaa[StormsDungeonData]|r Run over time limit (onTime=false) - marking as Failed")
+    elseif onTime ~= true and durationSeconds and durationSeconds > 0 and mapID then
+        local timeLimit = GetDungeonTimeLimitSeconds(mapID)
+        if timeLimit and durationSeconds > timeLimit then
+            runCompleted = false
+            print("|cff00ffaa[StormsDungeonData]|r Run over time limit (" .. tostring(durationSeconds) .. "s > " .. tostring(timeLimit) .. "s) - marking as Failed")
+        end
+    end
+
+    print("|cff00ffaa[StormsDungeonData]|r Completion info: mapID=" .. tostring(mapID) .. ", level=" .. tostring(level) .. ", time=" .. tostring(durationSeconds) .. "s, onTime=" .. tostring(onTime) .. ", result=" .. (runCompleted and "Completed" or "Failed"))
 
     if mapID and level then
         self.challengeRetryCount = 0
@@ -1070,6 +1282,26 @@ function Events:OnChallengeModeCompleted()
             startTime = time() - durationSeconds
         end
         
+        -- Get death count and time lost from API
+        local deathCount, timeLost = 0, 0
+        if C_ChallengeMode and C_ChallengeMode.GetDeathCount then
+            local deaths, lostTime = C_ChallengeMode.GetDeathCount()
+            if deaths then
+                deathCount = deaths
+                timeLost = lostTime or 0
+                print("|cff00ffaa[StormsDungeonData]|r Deaths: " .. deathCount .. ", Time Lost: " .. timeLost .. "s")
+            end
+        end
+        
+        -- Get actual start time from API if available
+        if C_ChallengeMode and C_ChallengeMode.GetStartTime then
+            local apiStartTime = C_ChallengeMode.GetStartTime()
+            if apiStartTime and apiStartTime > 0 then
+                startTime = apiStartTime
+                print("|cff00ffaa[StormsDungeonData]|r Using API start time: " .. tostring(startTime))
+            end
+        end
+        
         -- Capture enemy forces data NOW while we're still in the dungeon
         -- This prevents issues if the player leaves before FinalizeRun is called
         local earlyForces = GetEnemyForcesProgress()
@@ -1079,19 +1311,23 @@ function Events:OnChallengeModeCompleted()
             print("|cff00ffaa[StormsDungeonData]|r Captured mob data at completion: " .. string.format("%.1f%%", earlyForces.percent) .. " (" .. tostring(earlyForces.current) .. "/" .. tostring(earlyForces.total) .. ")")
         end
 
-        -- Store run info for later
+        -- Store run info for later (completed = within time limit; over time = Failed)
         MPT.CurrentRunData = {
             dungeonID = mapID,
             dungeonName = name,
             keystoneLevel = level,
             affixes = affixes,
             keystoneUpgrades = keystoneUpgrades,
-            completed = true,
+            completed = runCompleted,
             players = playerStats,
             startTime = startTime,
             completionTime = time(),
             completionDuration = durationSeconds,
             saved = false,
+            
+            -- Death tracking
+            deathCount = deathCount,
+            timeLost = timeLost,
             
             -- Pre-capture mob data if available (prevents loss if player leaves dungeon)
             mobsKilled = capturedMobData and (earlyForces.current or 0) or nil,
@@ -1371,6 +1607,19 @@ function Events:FinalizeRun(reason)
             MPT.CurrentRunData.players = cleaned
         end
         MPT.CurrentRunData.players = MPT.CurrentRunData.players or {}
+        
+        -- ONLY use combat log as the authoritative source - don't cross-check with damage meters
+        -- since players may have left the party after the run
+        local combatLogPlayers = nil
+        if MPT.CombatLog and MPT.CombatLog.GetValidatedPlayerNames then
+            combatLogPlayers = MPT.CombatLog:GetValidatedPlayerNames()
+            if combatLogPlayers and next(combatLogPlayers) then
+                local count = 0
+                for _ in pairs(combatLogPlayers) do count = count + 1 end
+                print("|cff00ffaa[StormsDungeonData]|r Combat log validated " .. count .. " players (authoritative source)")
+            end
+        end
+        
         local existing = {}
         for _, p in ipairs(MPT.CurrentRunData.players) do
             local key = NormalizeUnitName(p.name) or p.name
@@ -1378,15 +1627,42 @@ function Events:FinalizeRun(reason)
                 existing[key] = true
             end
         end
+        
+        -- Only add players from stats if they're in the combat log validation list
         for key, data in pairs(stats) do
             if not existing[key] then
-                local displayName = (type(data.name) == "string" and data.name ~= "" and data.name) or (type(key) == "string" and key ~= "" and key) or nil
-                if displayName then
-                    local class = data.class
-                    table.insert(MPT.CurrentRunData.players, MPT.Database:CreatePlayerStats(nil, displayName, class, nil))
-                    existing[key] = true
+                local isValid = false
+                
+                -- Accept only if validated by combat log and name has realm (no realm = pet)
+                if combatLogPlayers and combatLogPlayers[key] then
+                    local displayName = (type(data.name) == "string" and data.name ~= "" and data.name) or (type(key) == "string" and key ~= "" and key) or nil
+                    if displayName and NameHasRealm(displayName) then
+                        isValid = true
+                        local class = data.class
+                        table.insert(MPT.CurrentRunData.players, MPT.Database:CreatePlayerStats(nil, displayName, class, nil))
+                        existing[key] = true
+                        print("|cff00ffaa[StormsDungeonData]|r ✓ Validated player: " .. displayName)
+                    end
                 end
             end
+        end
+        
+        -- Final safety check: ensure we never have more than 5 players
+        if #MPT.CurrentRunData.players > 5 then
+            print("|cffff4444[StormsDungeonData]|r WARNING: Found " .. #MPT.CurrentRunData.players .. " players, trimming to 5 most active")
+            -- Sort by total activity (damage + healing) and keep only top 5
+            table.sort(MPT.CurrentRunData.players, function(a, b)
+                local aActivity = (a.damage or 0) + (a.healing or 0)
+                local bActivity = (b.damage or 0) + (b.healing or 0)
+                return aActivity > bActivity
+            end)
+            -- Trim to 5 players
+            local trimmed = {}
+            for i = 1, math.min(5, #MPT.CurrentRunData.players) do
+                table.insert(trimmed, MPT.CurrentRunData.players[i])
+            end
+            MPT.CurrentRunData.players = trimmed
+            print("|cff00ffaa[StormsDungeonData]|r Kept top 5 players by activity")
         end
     end
 
@@ -1418,7 +1694,7 @@ function Events:FinalizeRun(reason)
             MPT.CurrentRunData.players = {}
             for key, data in pairs(detailsStats) do
                 local displayName = (type(data.name) == "string" and data.name ~= "" and data.name) or (type(key) == "string" and key ~= "" and key) or nil
-                if displayName then
+                if displayName and NameHasRealm(displayName) then
                     local class = data.class
                     table.insert(MPT.CurrentRunData.players, MPT.Database:CreatePlayerStats(nil, displayName, class, nil))
                 end
@@ -1526,6 +1802,8 @@ function Events:FinalizeRun(reason)
     runRecord.mobsKilled = MPT.CurrentRunData.mobsKilled or 0
     runRecord.mobsTotal = MPT.CurrentRunData.mobsTotal or 0
     runRecord.overallMobPercentage = MPT.CurrentRunData.overallMobPercentage or 0
+    runRecord.deathCount = MPT.CurrentRunData.deathCount
+    runRecord.timeLost = MPT.CurrentRunData.timeLost
     runRecord.finalizeReason = reason
     runRecord.groupMembers = MPT.CurrentRunData.groupMembers
 
@@ -1544,7 +1822,7 @@ function Events:FinalizeRun(reason)
     MPT.LastSavedRunReason = reason
 
     -- Show scoreboard for loot/manual triggers, plus fallback for completion without loot window.
-    if autoShow and (reason == "loot" or reason == "manual-loot" or reason == "manual" or reason == "completed" or reason == "timeout" or reason == "exit") then
+    if autoShow and (reason == "loot" or reason == "manual-loot" or reason == "manual" or reason == "completed" or reason == "timeout" or reason == "exit" or reason == "rewards_event") then
         MPT.UI:ShowScoreboard(runRecord)
         MPT.LastSavedRunShown = true
     end
@@ -1552,11 +1830,14 @@ function Events:FinalizeRun(reason)
     MPT.CurrentRunData.saved = true
     print("|cff00ffaa[StormsDungeonData]|r Run saved!" .. (reason and (" (" .. reason .. ")") or ""))
     MPT.CurrentRunData = nil
+    
+    -- Reset fallback timers flag for next run
+    self.fallbackTimersSet = false
+    
     return true
 end
 
 function Events:OnLootOpened()
-    -- Check if this is the mythic+ chest
     local numLootItems = GetNumLootItems()
     
     print("|cff00ffaa[StormsDungeonData]|r LOOT_OPENED event fired, numLootItems=" .. tostring(numLootItems))
@@ -1565,9 +1846,30 @@ function Events:OnLootOpened()
         print("|cff00ffaa[StormsDungeonData]|r CurrentRunData.completed=" .. tostring(MPT.CurrentRunData.completed) .. ", saved=" .. tostring(MPT.CurrentRunData.saved) .. ", completionTime=" .. tostring(MPT.CurrentRunData.completionTime))
     end
     
+    -- If we're in a mythic+ but have no CurrentRunData, the completion event didn't fire
+    -- Try to build run data from completion API
+    if not MPT.CurrentRunData and MPT.InMythicPlus then
+        print("|cff00ffaa[StormsDungeonData]|r Loot opened in M+ but no run data - attempting emergency save")
+        
+        -- Try OnChallengeModeCompleted first (uses completion APIs)
+        self:OnChallengeModeCompleted()
+        
+        -- If still no data, try building from active keystone
+        if not MPT.CurrentRunData then
+            print("|cff00ffaa[StormsDungeonData]|r OnChallengeModeCompleted failed, trying BuildRunDataFromActiveKeystone")
+            self:BuildRunDataFromActiveKeystone()
+        end
+    end
+    
     if numLootItems > 0 and not MPT.CurrentRunData then
         print("|cff00ffaa[StormsDungeonData]|r Loot opened but no current run, attempting to build from keystone")
         self:BuildRunDataFromActiveKeystone()
+    end
+
+    -- If we have CurrentRunData that's completed but not saved, finalize it
+    if MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
+        print("|cff00ffaa[StormsDungeonData]|r LOOT_OPENED: Finalizing completed but unsaved run")
+        self:FinalizeRun("loot_opened")
     end
 
     if numLootItems > 0 and MPT.CurrentRunData then
@@ -1651,16 +1953,23 @@ end
 -- Reconstruct CurrentRunData from C_MythicPlus.GetRunHistory() entry
 function Events:ReconstructRunDataFromHistory(runInfo)
     if not runInfo then
-        print("|cff00ffaa[StormsDungeonData]|r Cannot reconstruct run: no run info provided")
+        print("|cffff4444[StormsDungeonData]|r Cannot reconstruct run: no run info provided")
         return false
     end
     
     print("|cff00ffaa[StormsDungeonData]|r Reconstructing run data from history...")
+    print("|cff00ffaa[StormsDungeonData]|r   mapChallengeModeID: " .. tostring(runInfo.mapChallengeModeID))
+    print("|cff00ffaa[StormsDungeonData]|r   level: " .. tostring(runInfo.level))
+    print("|cff00ffaa[StormsDungeonData]|r   completed: " .. tostring(runInfo.completed))
+    print("|cff00ffaa[StormsDungeonData]|r   durationSec: " .. tostring(runInfo.durationSec))
     
     -- Get dungeon info
     local dungeonName = C_ChallengeMode.GetMapUIInfo(runInfo.mapChallengeModeID)
     if not dungeonName then
         dungeonName = "Unknown Dungeon"
+        print("|cffff4444[StormsDungeonData]|r WARNING: Could not get dungeon name from mapID " .. tostring(runInfo.mapChallengeModeID))
+    else
+        print("|cff00ffaa[StormsDungeonData]|r   dungeonName: " .. dungeonName)
     end
     
     -- Get current affixes
@@ -1699,10 +2008,17 @@ function Events:ReconstructRunDataFromHistory(runInfo)
     end
 
     -- Initialize CurrentRunData
+    -- CRITICAL: Ensure dungeonID is valid for save validation
+    local validDungeonID = runInfo.mapChallengeModeID
+    if not validDungeonID or validDungeonID == 0 then
+        print("|cffff4444[StormsDungeonData]|r ERROR: runInfo has invalid mapChallengeModeID: " .. tostring(validDungeonID))
+        return false
+    end
+    
     MPT.CurrentRunData = {
         dungeonName = dungeonName,
-        dungeonID = runInfo.mapChallengeModeID,
-        mapID = runInfo.mapChallengeModeID,
+        dungeonID = validDungeonID,
+        mapID = validDungeonID,
         keystoneLevel = runInfo.level,
         affixes = affixes,
         startTime = completionTimestamp - (runInfo.durationSec or 0), -- Estimate start time

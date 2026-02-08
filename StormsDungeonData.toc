@@ -16,9 +16,11 @@ Database.lua
 Events.lua
 DamageMeterCompat.lua
 CombatLog.lua
+CombatLogFileMonitor.lua
 TestMode.lua
 UI/MinimapButton.xml
 UI/ScoreboardFrame.lua
 UI/HistoryViewer.lua
 UI/UIUtils.lua
+LFGRatingIndicator.lua
 Main.lua

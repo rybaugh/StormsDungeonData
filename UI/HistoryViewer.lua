@@ -16,6 +16,18 @@ local function SafeCall(func, ...)
     return a, b, c, d
 end
 
+-- Time limit in seconds for dungeon (for showing red time when over limit on old runs)
+local function GetDungeonTimeLimitSeconds(mapID)
+    if not mapID or not C_ChallengeMode or type(C_ChallengeMode.GetMapUIInfo) ~= "function" then
+        return nil
+    end
+    local _, _, timeLimit = C_ChallengeMode.GetMapUIInfo(mapID)
+    if timeLimit and timeLimit > 0 and timeLimit < 100000 then
+        return timeLimit
+    end
+    return nil
+end
+
 -- Helper function to set backdrop compatibility with WoW 12.0+
 local function SetBackdropCompat(frame, backdropInfo, backdropColor, backdropBorderColor)
     if frame.SetBackdrop then
@@ -216,17 +228,16 @@ function HistoryViewer:Create()
     
     -- Averages & best stats grid
     local metricDefs = {
-        -- Row 1
+        -- Row 1: Best level, avg duration
         {key = "bestKeystoneLevel", label = "Best Level"},
         {key = "avgDuration", label = "Avg Duration"},
-        {key = "avgMobPercentage", label = "Avg Mob %"},
 
-        -- Row 2
+        -- Row 2: Best Damage, Best Healing, Best Interrupts
         {key = "bestDamage", label = "Best Damage"},
         {key = "bestHealing", label = "Best Healing"},
         {key = "bestInterrupts", label = "Best Interrupts"},
 
-        -- Row 3
+        -- Row 3: Avg Damage, Avg Healing, Avg Interrupts
         {key = "avgDamage", label = "Avg Damage"},
         {key = "avgHealing", label = "Avg Healing"},
         {key = "avgInterrupts", label = "Avg Interrupts"},
@@ -293,14 +304,14 @@ function HistoryViewer:Create()
     HeaderText("Dungeon", colX, 175, "LEFT"); colX = colX + 175
     HeaderText("Key", colX, 40, "CENTER"); colX = colX + 40
     HeaderText("Time", colX, 55, "CENTER"); colX = colX + 55
-    HeaderText("Result", colX, 60, "LEFT"); colX = colX + 60
-    HeaderText("Mobs", colX, 50, "CENTER"); colX = colX + 50
-    HeaderText("Spec", colX, 80, "LEFT"); colX = colX + 80
-    HeaderText("Hero", colX, 80, "LEFT"); colX = colX + 80
+    -- No Result column: failed runs shown by red Time text
+    HeaderText("Spec", colX, 80, "CENTER"); colX = colX + 80
+    HeaderText("Hero", colX, 80, "CENTER"); colX = colX + 80
     HeaderText("Date", colX, 110, "LEFT"); colX = colX + 110
-    HeaderText("DMG", colX, 70, "RIGHT"); colX = colX + 70
-    HeaderText("HPS", colX, 70, "RIGHT"); colX = colX + 70
-    HeaderText("INT", colX, 50, "CENTER")
+    HeaderText("Damage", colX, 70, "RIGHT"); colX = colX + 70
+    HeaderText("Healing", colX, 70, "RIGHT"); colX = colX + 70
+    HeaderText("INT", colX, 50, "CENTER"); colX = colX + 50
+    HeaderText("MVP", colX, 40, "CENTER")
     
     -- Run history scroll (reduced width to fit scrollbar within bounds, anchored right)
     frame.RunScroll, frame.RunContent = MPT.UIUtils:CreateScrollFrame(statsPanel, 860, 300)
@@ -316,6 +327,9 @@ function HistoryViewer:Create()
 end
 
 function HistoryViewer:Show()
+    if MPT.Scoreboard and MPT.Scoreboard.Hide then
+        MPT.Scoreboard:Hide()
+    end
     local frame = self:Create()
     -- Default to showing all runs when opening
     self.selectedDungeon = nil
@@ -325,6 +339,9 @@ function HistoryViewer:Show()
 end
 
 function HistoryViewer:ShowAtAnchor(anchorFrame)
+    if MPT.Scoreboard and MPT.Scoreboard.Hide then
+        MPT.Scoreboard:Hide()
+    end
     local frame = self:Create()
     self.selectedDungeon = nil
     self.selectedDungeonName = nil
@@ -563,7 +580,6 @@ function HistoryViewer:UpdateDisplay()
             avgDamage = 0,
             avgHealing = 0,
             avgInterrupts = 0,
-            avgMobPercentage = 0,
             bestKeystoneLevel = 0,
             bestDuration = 0,
             bestTime = nil,
@@ -577,7 +593,6 @@ function HistoryViewer:UpdateDisplay()
         local totalDamage = 0
         local totalHealing = 0
         local totalInterrupts = 0
-        local totalMobPercentage = 0
         local playerRunCount = 0
 
         for _, run in ipairs(runs) do
@@ -591,7 +606,6 @@ function HistoryViewer:UpdateDisplay()
 
             totalDuration = totalDuration + (run.duration or 0)
             totalLevel = totalLevel + (runLevel or 0)
-            totalMobPercentage = totalMobPercentage + (run.overallMobPercentage or 0)
 
             if run.playerStats then
                 for _, pstats in pairs(run.playerStats) do
@@ -633,7 +647,6 @@ function HistoryViewer:UpdateDisplay()
         stats.avgDamage = playerRunCount > 0 and math.floor(totalDamage / playerRunCount) or 0
         stats.avgHealing = playerRunCount > 0 and math.floor(totalHealing / playerRunCount) or 0
         stats.avgInterrupts = playerRunCount > 0 and math.floor(totalInterrupts / playerRunCount) or 0
-        stats.avgMobPercentage = stats.totalRuns > 0 and math.floor(totalMobPercentage / stats.totalRuns) or 0
 
         return stats
     end
@@ -739,7 +752,6 @@ function HistoryViewer:UpdateDisplay()
             self.frame.StatValues.bestHealing:SetText(MPT.Utils:FormatNumber(stats.bestHealing))
             self.frame.StatValues.avgInterrupts:SetText(tostring(stats.avgInterrupts))
             self.frame.StatValues.bestInterrupts:SetText(tostring(stats.bestInterrupts))
-            self.frame.StatValues.avgMobPercentage:SetText(string.format("%.1f%%", stats.avgMobPercentage))
         end
     end
     
@@ -766,6 +778,77 @@ function HistoryViewer:UpdateDisplay()
         return bestDamage, bestHealing, bestInterrupts
     end
 
+    local function IsPlayerMVP(run)
+        -- Check if any of the user's characters was MVP using the same scoring logic as scoreboard
+        local players = run.playerStats or run.players
+        if not players then return false end
+        
+        -- Get all user's characters
+        local userCharacters = {}
+        if MPT.Database and MPT.Database.GetAllCharacters then
+            local chars = MPT.Database:GetAllCharacters()
+            for _, char in ipairs(chars) do
+                local fullName = char.name .. "-" .. char.realm
+                userCharacters[fullName] = true
+                userCharacters[char.name] = true
+            end
+        end
+        
+        -- Calculate totals
+        local totalDamage, totalHealing, totalInterrupts = 0, 0, 0
+        local playerList = {}
+        
+        for _, p in pairs(players) do
+            local damage = p.damage or 0
+            local healing = p.healing or 0
+            local interrupts = p.interrupts or 0
+            
+            totalDamage = totalDamage + damage
+            totalHealing = totalHealing + healing
+            totalInterrupts = totalInterrupts + interrupts
+            
+            table.insert(playerList, {
+                name = p.name,
+                damage = damage,
+                healing = healing,
+                interrupts = interrupts,
+                role = p.role
+            })
+        end
+        
+        -- Find MVP using role-weighted scoring
+        local mvpScore = -1
+        local mvpName = nil
+        
+        for _, p in ipairs(playerList) do
+            local dmgShare = totalDamage > 0 and (p.damage / totalDamage) or 0
+            local healShare = totalHealing > 0 and (p.healing / totalHealing) or 0
+            local intShare = totalInterrupts > 0 and (p.interrupts / totalInterrupts) or 0
+            
+            local score = 0
+            if p.role == "TANK" then
+                score = (dmgShare * 0.3) + (healShare * 0.1) + (intShare * 0.6)
+            elseif p.role == "HEALER" then
+                score = (dmgShare * 0.2) + (healShare * 0.6) + (intShare * 0.2)
+            else
+                score = (dmgShare * 0.6) + (healShare * 0.1) + (intShare * 0.3)
+            end
+            
+            if score > mvpScore then
+                mvpScore = score
+                mvpName = p.name
+            end
+        end
+        
+        -- Check if MVP is one of user's characters
+        if mvpName then
+            local shortName = mvpName:match("^([^%-]+)") or mvpName
+            return userCharacters[mvpName] or userCharacters[shortName]
+        end
+        
+        return false
+    end
+
     -- Determine personal-best run stats per dungeon for the current view.
     -- We highlight only the specific stat numbers (DMG/HPS/INT), not the whole row.
     local pbDamageByDungeon, pbHealingByDungeon, pbInterruptsByDungeon = {}, {}, {}
@@ -785,6 +868,9 @@ function HistoryViewer:UpdateDisplay()
         runRow:EnableMouse(true)
         runRow:SetScript("OnMouseUp", function(_, button)
             if button == "LeftButton" then
+                -- Hide the history viewer before showing scoreboard
+                self:Hide()
+                
                 if MPT.UI and MPT.UI.ShowScoreboard then
                     MPT.UI:ShowScoreboard(run)
                 elseif MPT.Scoreboard and MPT.Scoreboard.Show then
@@ -803,7 +889,6 @@ function HistoryViewer:UpdateDisplay()
         hover:SetAlpha(0.16)
 
         local level = run.keystoneLevel or run.dungeonLevel or 0
-        local mobPct = run.overallMobPercentage or 0
         local bestDamage, bestHealing, bestInterrupts = GetRunBestStats(run)
 
         if idx % 2 == 0 then
@@ -833,21 +918,20 @@ function HistoryViewer:UpdateDisplay()
         durationText:SetWidth(55)
         durationText:SetJustifyH("CENTER")
         durationText:SetText(MPT.Utils:FormatDuration(run.duration or 0))
+        -- Red time = over limit (failed); normal color = completed in time. Also treat as over-time for old runs saved before we set completed=false.
+        local overTime = not run.completed
+        if not overTime and (run.duration or 0) > 0 and (run.dungeonID or run.dungeonId) then
+            local timeLimit = GetDungeonTimeLimitSeconds(run.dungeonID or run.dungeonId)
+            if timeLimit and run.duration > timeLimit then
+                overTime = true
+            end
+        end
+        if overTime then
+            durationText:SetTextColor(1, 0.27, 0.27, 1)
+        else
+            durationText:SetTextColor(1, 0.84, 0, 1)
+        end
         x = x + 55
-
-        local completedText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        completedText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        completedText:SetWidth(60)
-        completedText:SetJustifyH("LEFT")
-        completedText:SetText(run.completed and "|cff00ff00Completed|r" or "|cffff0000Failed|r")
-        x = x + 60
-
-        local mobText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        mobText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        mobText:SetWidth(50)
-        mobText:SetJustifyH("CENTER")
-        mobText:SetText(string.format("%.1f%%", mobPct))
-        x = x + 50
 
         local specText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         specText:SetPoint("LEFT", runRow, "LEFT", x, 0)
@@ -914,6 +998,18 @@ function HistoryViewer:UpdateDisplay()
         end
         intText:SetText(intValueText)
         x = x + 50
+
+        -- MVP indicator
+        local mvpText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        mvpText:SetPoint("LEFT", runRow, "LEFT", x, 0)
+        mvpText:SetWidth(40)
+        mvpText:SetJustifyH("CENTER")
+        if IsPlayerMVP(run) then
+            mvpText:SetText("|TInterface\\Icons\\Achievement_Dungeon_HEROIC_GloryoftheRaider:16:16:0:0|t")
+        else
+            mvpText:SetText("")
+        end
+        x = x + 40
 
         -- Delete button
         local deleteBtn = CreateFrame("Button", nil, runRow)

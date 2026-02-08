@@ -242,17 +242,21 @@ function MPT.PerformManualSave(source)
                 print("|cff00ffaa[StormsDungeonData]|r Reconstructing from history: " .. (dungeonName or "Unknown") .. " +" .. latestRun.level .. " (mapID=" .. latestRun.mapChallengeModeID .. ")")
                 
                 if MPT.Events and MPT.Events.ReconstructRunDataFromHistory then
-                    MPT.Events:ReconstructRunDataFromHistory(latestRun)
-                    if MPT.CurrentRunData then
+                    local success = MPT.Events:ReconstructRunDataFromHistory(latestRun)
+                    if success and MPT.CurrentRunData then
                         print("|cff00ffaa[StormsDungeonData]|r Reconstructed: " .. tostring(MPT.CurrentRunData.dungeonName) .. " +" .. tostring(MPT.CurrentRunData.keystoneLevel) .. ", mapID=" .. tostring(MPT.CurrentRunData.mapID or MPT.CurrentRunData.dungeonID))
                         
-                        -- Validate reconstructed data
+                        -- Validate reconstructed data - but provide helpful diagnostic info
                         if not MPT.CurrentRunData.dungeonID or MPT.CurrentRunData.dungeonID == 0 then
-                            print("|cffff4444[StormsDungeonData]|r ERROR: Reconstructed data has invalid dungeonID, clearing CurrentRunData")
+                            print("|cffff4444[StormsDungeonData]|r ERROR: Reconstructed data has invalid dungeonID")
+                            print("|cffff4444[StormsDungeonData]|r   mapChallengeModeID from history: " .. tostring(latestRun.mapChallengeModeID))
+                            print("|cffff4444[StormsDungeonData]|r   This likely means WoW's API did not return the run properly")
+                            print("|cffff4444[StormsDungeonData]|r   Try using /sdd force immediately after completing a key")
                             MPT.CurrentRunData = nil
                         end
                     else
-                        print("|cffff4444[StormsDungeonData]|r ERROR: ReconstructRunDataFromHistory failed to create CurrentRunData")
+                        print("|cffff4444[StormsDungeonData]|r ERROR: ReconstructRunDataFromHistory returned false or failed to create CurrentRunData")
+                        print("|cffff4444[StormsDungeonData]|r   This means the run history entry was invalid")
                     end
                 end
             else
@@ -299,8 +303,14 @@ function MPT.UI:Initialize()
     
     local function OnMinimapClick(_, button)
         if button == "RightButton" then
+            if MPT.HistoryViewer and MPT.HistoryViewer.Hide then
+                MPT.HistoryViewer:Hide()
+            end
             MPT.PerformManualSave("minimap")
         else
+            if MPT.Scoreboard and MPT.Scoreboard.Hide then
+                MPT.Scoreboard:Hide()
+            end
             MPT.HistoryViewer:Show()
         end
     end
@@ -340,6 +350,9 @@ function MPT.UI:Initialize()
 end
 
 function MPT.UI:ShowScoreboard(runRecord)
+    if MPT.HistoryViewer and MPT.HistoryViewer.Hide then
+        MPT.HistoryViewer:Hide()
+    end
     if MPT.Scoreboard and MPT.Scoreboard.Show then
         MPT.Scoreboard:Show(runRecord)
     end

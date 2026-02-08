@@ -5,6 +5,43 @@ local MPT = StormsDungeonData
 local Scoreboard = {}
 MPT.Scoreboard = Scoreboard
 
+-- Build a short friend-list note from our good/bad counts (e.g. "SDD: Good +5, Bad +2")
+local function GetRatingNoteForFriend(playerName)
+    if not MPT.Database or not playerName then return "" end
+    local goodCount = MPT.Database.GetPlayerGoodCount and MPT.Database:GetPlayerGoodCount(playerName) or 0
+    local badCount = MPT.Database.GetPlayerBadCount and MPT.Database:GetPlayerBadCount(playerName) or 0
+    if goodCount == 0 and badCount == 0 then
+        local rating = MPT.Database.GetPlayerRating and MPT.Database:GetPlayerRating(playerName)
+        if rating == "good" then goodCount = 1 elseif rating == "bad" then badCount = 1 end
+    end
+    if goodCount == 0 and badCount == 0 then return "" end
+    local parts = {}
+    if goodCount > 0 then parts[#parts + 1] = "Good +" .. goodCount end
+    if badCount > 0 then parts[#parts + 1] = "Bad +" .. badCount end
+    return "SDD: " .. table.concat(parts, ", ")
+end
+
+-- Check if playerName is on the current character's friend list (by iterating C_FriendList)
+local function IsPlayerFriend(playerName)
+    if not playerName or type(playerName) ~= "string" or not C_FriendList or not C_FriendList.GetNumFriends then
+        return false
+    end
+    local num = C_FriendList.GetNumFriends()
+    local nameNorm = playerName:gsub("%s+", ""):lower()
+    for i = 1, num do
+        local info = C_FriendList.GetFriendInfoByIndex(i)
+        if info and info.name then
+            local friendNorm = info.name:gsub("%s+", ""):lower()
+            if friendNorm == nameNorm then return true end
+            -- Also match "Name-Realm" vs "Name"
+            local friendShort = friendNorm:match("^([^%-]+)") or friendNorm
+            local nameShort = nameNorm:match("^([^%-]+)") or nameNorm
+            if friendShort == nameShort then return true end
+        end
+    end
+    return false
+end
+
 local function SafeCall(func, ...)
     if type(func) ~= "function" then
         return nil
@@ -238,22 +275,27 @@ function Scoreboard:Create()
     }
     SetBackdropCompat(dungeonInfoBg, backdropInfo, {0.1, 0.1, 0.1, 0.5}, {1, 1, 1, 0.3})
     
-    -- Dungeon name - centered
+    -- Dungeon name - Line 1
     local dungeonName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    dungeonName:SetPoint("TOP", dungeonInfoBg, "TOP", 0, -10)
-    dungeonName:SetJustifyH("CENTER")
+    dungeonName:SetPoint("TOPLEFT", dungeonInfoBg, "TOPLEFT", 25, -10)
+    dungeonName:SetJustifyH("LEFT")
     frame.DungeonName = dungeonName
     
-    -- Keystone level - under dungeon name
+    -- Line 2: Keystone level and Duration (same line)
     local keystoneLevel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    keystoneLevel:SetPoint("TOP", dungeonName, "BOTTOM", 0, -4)
-    keystoneLevel:SetJustifyH("CENTER")
+    keystoneLevel:SetPoint("TOPLEFT", dungeonName, "BOTTOMLEFT", 0, -6)
+    keystoneLevel:SetJustifyH("LEFT")
     frame.KeystoneLevel = keystoneLevel
 
-    -- Spec/Hero icon slots (icons only, centered)
+    local duration = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    duration:SetPoint("LEFT", keystoneLevel, "RIGHT", 10, 0)
+    duration:SetJustifyH("LEFT")
+    frame.Duration = duration
+
+    -- Line 3: Spec and Hero (same line, under keystone/duration)
     local specIconFrame = CreateFrame("Frame", nil, frame)
     specIconFrame:SetSize(24, 24)
-    specIconFrame:SetPoint("RIGHT", keystoneLevel, "LEFT", -8, 0)
+    specIconFrame:SetPoint("TOPLEFT", keystoneLevel, "BOTTOMLEFT", 0, -8)
 
     local specIconText = specIconFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     specIconText:SetPoint("CENTER", specIconFrame, "CENTER", 0, 0)
@@ -262,24 +304,19 @@ function Scoreboard:Create()
 
     local heroIconFrame = CreateFrame("Frame", nil, frame)
     heroIconFrame:SetSize(80, 24)
-    heroIconFrame:SetPoint("LEFT", keystoneLevel, "RIGHT", 8, 0)
+    heroIconFrame:SetPoint("LEFT", specIconFrame, "RIGHT", 8, 0)
 
     local heroIconText = heroIconFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     heroIconText:SetPoint("CENTER", heroIconFrame, "CENTER", 0, 0)
     heroIconText:SetJustifyH("CENTER")
     heroIconText:SetTextColor(0.8, 0.8, 1, 1)  -- Light blue tint
     frame.HeroIconText = heroIconText
-
-    -- Duration - bigger and under dungeon name
-    local duration = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
-    duration:SetPoint("TOP", keystoneLevel, "BOTTOM", 0, -6)
-    duration:SetJustifyH("CENTER")
-    frame.Duration = duration
     
     -- Player stats table header
     local headerY = -155
     local headers = {"Player", "Damage", "Healing", "Interrupts"}
     local columnWidths = {200, 200, 200, 180}
+    local playerNameWidth = 118  -- Leave room for rating + add-friend buttons in same column
     local headerX = 10
     
     -- Create header background
@@ -332,10 +369,54 @@ function Scoreboard:Create()
         mvpBg:SetColorTexture(1, 0.84, 0, 0.12)
         mvpBg:Hide()
         
+        local roleIconSize = 16
+        local roleIconGap = 4
+        local roleIcon = row:CreateTexture(nil, "OVERLAY")
+        roleIcon:SetSize(roleIconSize, roleIconSize)
+        roleIcon:SetPoint("LEFT", row, "LEFT", 0, 0)
+        roleIcon:Hide()
+        -- Text fallback (T/H/D) when Blizzard role texture doesn't load
+        local roleLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        roleLabel:SetPoint("LEFT", row, "LEFT", 0, 0)
+        roleLabel:SetSize(roleIconSize, roleIconSize)
+        roleLabel:SetJustifyH("CENTER")
+        roleLabel:SetJustifyV("MIDDLE")
+        roleLabel:SetFont(roleLabel:GetFont(), 11, "OUTLINE")
+        roleLabel:Hide()
+        
         local playerName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        playerName:SetPoint("LEFT", row, "LEFT", 0, 0)
-        playerName:SetWidth(columnWidths[1])
+        playerName:SetPoint("LEFT", row, "LEFT", roleIconSize + roleIconGap, 0)
+        playerName:SetWidth(playerNameWidth)
         playerName:SetJustifyH("LEFT")
+        
+        -- Thumbs up (good) and thumbs down (bad) for non-user players
+        local ratingUpBtn = CreateFrame("Button", nil, row, "GameMenuButtonTemplate")
+        ratingUpBtn:SetSize(22, 20)
+        ratingUpBtn:SetPoint("LEFT", row, "LEFT", roleIconSize + roleIconGap + playerNameWidth + 2, 0)
+        ratingUpBtn:SetText("|cff00ff00+|r")
+        ratingUpBtn:SetScript("OnClick", function() end)  -- Set per-row in Show()
+        ratingUpBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Rate good") end)
+        ratingUpBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        ratingUpBtn:Hide()
+        
+        local ratingDownBtn = CreateFrame("Button", nil, row, "GameMenuButtonTemplate")
+        ratingDownBtn:SetSize(22, 20)
+        ratingDownBtn:SetPoint("LEFT", ratingUpBtn, "RIGHT", 2, 0)
+        ratingDownBtn:SetText("|cffff4444-|r")
+        ratingDownBtn:SetScript("OnClick", function() end)
+        ratingDownBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Rate bad") end)
+        ratingDownBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        ratingDownBtn:Hide()
+        
+        -- Add Friend button (for non-user players)
+        local addFriendBtn = CreateFrame("Button", nil, row, "GameMenuButtonTemplate")
+        addFriendBtn:SetSize(54, 20)
+        addFriendBtn:SetPoint("LEFT", ratingDownBtn, "RIGHT", 2, 0)
+        addFriendBtn:SetText("Friend")
+        addFriendBtn:SetScript("OnClick", function() end)
+        addFriendBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Add to friend list") end)
+        addFriendBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        addFriendBtn:Hide()
         
         local damage = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         damage:SetPoint("LEFT", row, "LEFT", columnWidths[1], 0)
@@ -355,10 +436,15 @@ function Scoreboard:Create()
         table.insert(frame.PlayerRows, {
             frame = row,
             mvpBg = mvpBg,
+            roleIcon = roleIcon,
+            roleLabel = roleLabel,
             name = playerName,
             damage = damage,
             healing = healing,
             interrupts = interrupts,
+            ratingUpBtn = ratingUpBtn,
+            ratingDownBtn = ratingDownBtn,
+            addFriendBtn = addFriendBtn,
         })
     end
 
@@ -375,41 +461,41 @@ function Scoreboard:Create()
 
     local totalsText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     totalsText:SetPoint("TOPLEFT", footerBg, "TOPLEFT", 12, -28)
-    totalsText:SetText("Damage: --   Healing: --   Interrupts: --")
+    totalsText:SetText("Damage: --   Healing: --   Interrupts: --   Deaths: --")
     frame.TotalsText = totalsText
 
-    local mvpTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    mvpTitle:SetPoint("TOPLEFT", footerBg, "TOPLEFT", 520, -10)
+    local mvpTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    mvpTitle:SetPoint("TOP", dungeonInfoBg, "TOP", 300, -10)
     mvpTitle:SetTextColor(1, 0.84, 0, 1)
     mvpTitle:SetText("MVP")
+    mvpTitle:SetJustifyH("CENTER")
 
-    local mvpName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    mvpName:SetPoint("TOPLEFT", footerBg, "TOPLEFT", 520, -26)
+    local mvpName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+    mvpName:SetPoint("TOP", mvpTitle, "BOTTOM", 0, -8)
     mvpName:SetText("--")
+    mvpName:SetJustifyH("CENTER")
     frame.MVPName = mvpName
 
     local mvpDetails = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    mvpDetails:SetPoint("TOPLEFT", footerBg, "TOPLEFT", 520, -48)
+    mvpDetails:SetPoint("TOP", mvpName, "BOTTOM", 0, -4)
     mvpDetails:SetText("--")
+    mvpDetails:SetJustifyH("CENTER")
     frame.MVPDetails = mvpDetails
     
     -- Buttons at bottom
     local buttonWidth = 100
     local buttonHeight = 24
     
-    local closeButton = MPT.UIUtils:CreateButton(frame, "Close", buttonWidth, buttonHeight, function()
-        frame:Hide()
-    end)
-    closeButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -15, 15)
-    
     local historyButton = MPT.UIUtils:CreateButton(frame, "History", buttonWidth, buttonHeight, function()
-        if MPT.HistoryViewer and MPT.HistoryViewer.ShowAtAnchor then
-            MPT.HistoryViewer:ShowAtAnchor(frame)
-        else
+        -- Hide the scoreboard before showing history
+        frame:Hide()
+        
+        -- Show history centered, not anchored to scoreboard
+        if MPT.HistoryViewer then
             MPT.HistoryViewer:Show()
         end
     end)
-    historyButton:SetPoint("BOTTOMRIGHT", closeButton, "BOTTOMLEFT", -5, 0)
+    historyButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -15, 15)
     
     self.frame = frame
     return frame
@@ -492,6 +578,17 @@ function Scoreboard:Show(runRecord)
             return best
         end
 
+        -- Get all user's character names
+        local userCharacters = {}
+        if MPT.Database and MPT.Database.GetAllCharacters then
+            local chars = MPT.Database:GetAllCharacters()
+            for _, char in ipairs(chars) do
+                local fullName = char.name .. "-" .. char.realm
+                userCharacters[fullName] = true
+                userCharacters[char.name] = true
+            end
+        end
+
         for _, run in ipairs(db.runs) do
             local sameDungeon = false
             if dungeonID and run.dungeonID and run.dungeonID ~= 0 then
@@ -501,14 +598,20 @@ function Scoreboard:Show(runRecord)
             end
 
             if sameDungeon then
-                if run.playerStats and run.playerStats[playerName] then
-                    local pstats = run.playerStats[playerName]
-                    best.damage = math.max(best.damage, pstats.damage or 0)
-                    best.healing = math.max(best.healing, pstats.healing or 0)
-                    best.interrupts = math.max(best.interrupts, pstats.interrupts or 0)
+                if run.playerStats then
+                    for pName, pstats in pairs(run.playerStats) do
+                        -- Check if this player is one of the user's characters
+                        local shortName = pName:match("^([^%-]+)") or pName
+                        if userCharacters[pName] or userCharacters[shortName] then
+                            best.damage = math.max(best.damage, pstats.damage or 0)
+                            best.healing = math.max(best.healing, pstats.healing or 0)
+                            best.interrupts = math.max(best.interrupts, pstats.interrupts or 0)
+                        end
+                    end
                 elseif run.players then
                     for _, p in ipairs(run.players) do
-                        if p.name == playerName then
+                        local shortName = p.name and (p.name:match("^([^%-]+)") or p.name)
+                        if shortName and (userCharacters[p.name] or userCharacters[shortName]) then
                             best.damage = math.max(best.damage, p.damage or 0)
                             best.healing = math.max(best.healing, p.healing or 0)
                             best.interrupts = math.max(best.interrupts, p.interrupts or 0)
@@ -521,7 +624,7 @@ function Scoreboard:Show(runRecord)
         return best
     end
 
-    local totalsDamage, totalsHealing, totalsInterrupts = 0, 0, 0
+    local totalsDamage, totalsHealing, totalsInterrupts, totalsDeaths = 0, 0, 0, 0
     local mvpIndex = nil
     local mvpScore = nil
     local mvpStats = nil
@@ -559,6 +662,47 @@ function Scoreboard:Show(runRecord)
             return value
         end
         return tostring(value)
+    end
+
+    -- Use saved/spec roles (player.role, stats.role from UnitGroupRolesAssigned or spec at completion).
+    -- Fill missing slots to enforce 1 tank, 1 healer, 3 damage: healer = max healing among unassigned; tank = first unassigned; rest = damager.
+    local assignedRole = {}
+    do
+        local n = math.min(5, #playerData)
+        local healing = {}
+        for j = 1, n do
+            local p = playerData[j]
+            local s = p.stats or (p.damage ~= nil or p.healing ~= nil or p.interrupts ~= nil) and p or {}
+            healing[j] = s.healing or p.healing or 0
+            local saved = p.role or s.role
+            if saved == "TANK" or saved == "HEALER" or saved == "DAMAGER" then
+                assignedRole[j] = saved
+            end
+        end
+        local nTank, nHealer, nDamager = 0, 0, 0
+        for j = 1, n do
+            local r = assignedRole[j]
+            if r == "TANK" then nTank = nTank + 1 elseif r == "HEALER" then nHealer = nHealer + 1 elseif r == "DAMAGER" then nDamager = nDamager + 1 end
+        end
+        local unassigned = {}
+        for j = 1, n do if not assignedRole[j] then unassigned[#unassigned + 1] = j end end
+        if #unassigned > 0 then
+            if nHealer < 1 then
+                local best = unassigned[1]
+                for _, idx in ipairs(unassigned) do
+                    if healing[idx] > healing[best] then best = idx end
+                end
+                assignedRole[best] = "HEALER"
+                nHealer = 1
+                for i = 1, #unassigned do if unassigned[i] == best then table.remove(unassigned, i) break end end
+            end
+            if nTank < 1 and #unassigned > 0 then
+                assignedRole[unassigned[1]] = "TANK"
+                table.remove(unassigned, 1)
+            end
+            for _, idx in ipairs(unassigned) do assignedRole[idx] = "DAMAGER" end
+        end
+        for j = 1, n do if not assignedRole[j] then assignedRole[j] = "DAMAGER" end end
     end
 
     for i, player in ipairs(playerData) do
@@ -599,6 +743,65 @@ function Scoreboard:Show(runRecord)
                     row.name:SetTextColor(1, 0.82, 0, 1) -- default WoW-ish gold
                 end
             end
+            
+            -- Role: use assigned 1 tank / 1 healer / 3 damager from pre-pass (healer = max healing, tank = max interrupts among non-healers).
+            local role = assignedRole[i] or "DAMAGER"
+            if row.roleLabel then
+                row.roleLabel:Hide()
+            end
+            if row.roleIcon then
+                local useAtlas = false
+                if C_Texture and C_Texture.GetAtlasInfo then
+                    local roleKey = (role == "TANK" and "tank") or (role == "HEALER" and "healer") or "damager"
+                    local candidates = {
+                        "roleicon-" .. roleKey,
+                        "RoleIcon-" .. roleKey:gsub("^%l", string.upper),
+                        "groupfinder-icon-role-" .. roleKey,
+                        "LFG-RoleIcon-" .. roleKey:gsub("^%l", string.upper),
+                    }
+                    for _, atlasName in ipairs(candidates) do
+                        if C_Texture.GetAtlasInfo(atlasName) then
+                            row.roleIcon:SetAtlas(atlasName)
+                            row.roleIcon:Show()
+                            useAtlas = true
+                            break
+                        end
+                    end
+                end
+                if not useAtlas then
+                    local path = "Interface\\LFGFrame\\UI-LFG-Icon-PortraitRoles"
+                    local l, r, t, b
+                    if role == "TANK" then
+                        l, r, t, b = 0, 0.28125, 0.328125, 0.625
+                    elseif role == "HEALER" then
+                        l, r, t, b = 0.3125, 0.59375, 0, 0.296875
+                    else
+                        l, r, t, b = 0.3125, 0.59375, 0.328125, 0.625
+                    end
+                    row.roleIcon:SetTexture(path)
+                    row.roleIcon:SetTexCoord(l, r, t, b)
+                    row.roleIcon:SetDrawLayer("OVERLAY", 0)
+                    row.roleIcon:Show()
+                end
+            end
+            
+            -- Check if this player is one of the user's characters
+            local isUserCharacter = false
+            if player.name then
+                if MPT.Database and MPT.Database.GetAllCharacters then
+                    local chars = MPT.Database:GetAllCharacters()
+                    for _, char in ipairs(chars) do
+                        local fullName = char.name .. "-" .. char.realm
+                        local shortName = player.name:match("^([^%-]+)") or player.name
+                        local shortCharName = char.name:match("^([^%-]+)") or char.name
+                        if player.name == fullName or shortName == shortCharName then
+                            isUserCharacter = true
+                            break
+                        end
+                    end
+                end
+            end
+            
             local personalBest = GetPersonalBestStats(runRecord.dungeonID, runRecord.dungeonName, player.name)
             local damageValue = stats.damage or 0
             local healingValue = stats.healing or 0
@@ -608,28 +811,106 @@ function Scoreboard:Show(runRecord)
             local healingText = MPT.Utils:FormatNumber(healingValue)
             local interruptsText = tostring(interruptsValue)
 
-            if damageValue > 0 and damageValue >= personalBest.damage then
-                damageText = "|cffff8000" .. damageText .. "|r"
-            end
-            if healingValue > 0 and healingValue >= personalBest.healing then
-                healingText = "|cffff8000" .. healingText .. "|r"
-            end
-            if interruptsValue > 0 and interruptsValue >= personalBest.interrupts then
-                interruptsText = "|cffff8000" .. interruptsText .. "|r"
+            -- Only highlight in orange if this is the user's character AND they achieved a personal best
+            if isUserCharacter then
+                if damageValue > 0 and damageValue >= personalBest.damage then
+                    damageText = "|cffff8000" .. damageText .. "|r"
+                end
+                if healingValue > 0 and healingValue >= personalBest.healing then
+                    healingText = "|cffff8000" .. healingText .. "|r"
+                end
+                if interruptsValue > 0 and interruptsValue >= personalBest.interrupts then
+                    interruptsText = "|cffff8000" .. interruptsText .. "|r"
+                end
             end
 
             row.damage:SetText(SafeText(damageText, "0"))
             row.healing:SetText(SafeText(healingText, "0"))
             row.interrupts:SetText(SafeText(interruptsText, "0"))
 
+            -- Show rating and add-friend buttons only for non-user players
+            local playerNameForActions = nameText or player.name
+            if isUserCharacter then
+                if row.ratingUpBtn then row.ratingUpBtn:Hide() end
+                if row.ratingDownBtn then row.ratingDownBtn:Hide() end
+                if row.addFriendBtn then row.addFriendBtn:Hide() end
+            else
+                local rating = (MPT.Database and MPT.Database.GetPlayerRating and playerNameForActions) and MPT.Database:GetPlayerRating(playerNameForActions) or nil
+                local isFriend = IsPlayerFriend(playerNameForActions)
+                
+                if row.ratingUpBtn then
+                    row.ratingUpBtn:Show()
+                    local goodCount = (MPT.Database and MPT.Database.GetPlayerGoodCount and playerNameForActions) and MPT.Database:GetPlayerGoodCount(playerNameForActions) or 0
+                    -- Selected: white brackets + green plus. Unselected: dim green plus.
+                    row.ratingUpBtn:SetText(rating == "good" and "|cffffffff[|r|cff00ff00+|r|cffffffff]|r" or "|cff88ff88+|r")
+                    row.ratingUpBtn:SetScript("OnClick", function()
+                        if MPT.Database and playerNameForActions then
+                            if MPT.Database.IncrementPlayerGoodCount then
+                                MPT.Database:IncrementPlayerGoodCount(playerNameForActions)
+                            end
+                            if MPT.Database.SetPlayerRating then
+                                MPT.Database:SetPlayerRating(playerNameForActions, "good")
+                            end
+                            if IsPlayerFriend(playerNameForActions) and C_FriendList and C_FriendList.SetFriendNotes then
+                                C_FriendList.SetFriendNotes(playerNameForActions, GetRatingNoteForFriend(playerNameForActions))
+                            end
+                            Scoreboard:Show(runRecord)
+                        end
+                    end)
+                end
+                if row.ratingDownBtn then
+                    row.ratingDownBtn:Show()
+                    -- Selected: white brackets + red minus so "rated bad" is obvious on dark button. Unselected: dim red minus.
+                    row.ratingDownBtn:SetText(rating == "bad" and "|cffffffff[|r|cffff4444-|r|cffffffff]|r" or "|cffff8888-|r")
+                    row.ratingDownBtn:SetScript("OnClick", function()
+                        if MPT.Database and playerNameForActions then
+                            if MPT.Database.IncrementPlayerBadCount then
+                                MPT.Database:IncrementPlayerBadCount(playerNameForActions)
+                            end
+                            if MPT.Database.SetPlayerRating then
+                                MPT.Database:SetPlayerRating(playerNameForActions, "bad")
+                            end
+                            if IsPlayerFriend(playerNameForActions) and C_FriendList and C_FriendList.SetFriendNotes then
+                                C_FriendList.SetFriendNotes(playerNameForActions, GetRatingNoteForFriend(playerNameForActions))
+                            end
+                            Scoreboard:Show(runRecord)
+                        end
+                    end)
+                end
+                if row.addFriendBtn then
+                    row.addFriendBtn:Show()
+                    if isFriend then
+                        row.addFriendBtn:SetText("Friends")
+                        row.addFriendBtn:Disable()
+                        row.addFriendBtn:SetScript("OnClick", function() end)
+                        row.addFriendBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Already on friend list") end)
+                    else
+                        row.addFriendBtn:SetText("Add")
+                        row.addFriendBtn:Enable()
+                        row.addFriendBtn:SetScript("OnClick", function()
+                            if C_FriendList and C_FriendList.AddFriend and playerNameForActions then
+                                local note = GetRatingNoteForFriend(playerNameForActions)
+                                C_FriendList.AddFriend(playerNameForActions, note)
+                                row.addFriendBtn:SetText("Friends")
+                                row.addFriendBtn:Disable()
+                                row.addFriendBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Already on friend list") end)
+                            end
+                        end)
+                        row.addFriendBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Add to friend list") end)
+                    end
+                    row.addFriendBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                end
+            end
+
             totalsDamage = totalsDamage + (stats.damage or 0)
             totalsHealing = totalsHealing + (stats.healing or 0)
             totalsInterrupts = totalsInterrupts + (stats.interrupts or 0)
+            totalsDeaths = totalsDeaths + (stats.deaths or 0)
 
             mvpCandidates[i] = {
                 player = player,
                 stats = stats,
-                role = player.role or stats.role,
+                role = assignedRole[i] or player.role or stats.role,
             }
             
             row.frame:Show()
@@ -663,14 +944,18 @@ function Scoreboard:Show(runRecord)
     -- Check if we have any combat data at all
     local noCombatData = (totalsDamage == 0 and totalsHealing == 0 and totalsInterrupts == 0)
     
+    -- Total deaths: prefer run record (C_ChallengeMode.GetDeathCount at completion), else sum from player rows
+    local totalDeaths = (runRecord.deathCount ~= nil and runRecord.deathCount >= 0) and runRecord.deathCount or totalsDeaths
+
     if noCombatData then
         frame.TotalsText:SetText("|cffff4444No combat data available - see chat for details|r")
     else
         frame.TotalsText:SetText(string.format(
-            "Damage: |cffff8000%s|r   Healing: |cff00ff00%s|r   Interrupts: |cff0088ff%d|r",
+            "Damage: |cffff8000%s|r   Healing: |cff00ff00%s|r   Interrupts: |cff0088ff%d|r   Deaths: |cffff4444%d|r",
             MPT.Utils:FormatNumber(totalsDamage),
             MPT.Utils:FormatNumber(totalsHealing),
-            totalsInterrupts
+            totalsInterrupts,
+            totalDeaths
         ))
     end
 
@@ -700,19 +985,20 @@ function Scoreboard:Show(runRecord)
             frame.MVPName:SetTextColor(1, 0.82, 0, 1)
         end
 
-        frame.MVPDetails:SetText(string.format(
-            "DMG: %s   HPS: %s   INT: %d   Deaths: %d",
-            MPT.Utils:FormatNumber(mvpStats and mvpStats.damage or 0),
-            MPT.Utils:FormatNumber(mvpStats and mvpStats.healing or 0),
-            (mvpStats and mvpStats.interrupts or 0),
-            (mvpStats and mvpStats.deaths or 0)
-        ))
+        -- MVP section only shows the name, no stats
+        frame.MVPDetails:SetText("")
     end
     
     -- Hide unused rows
     local numRows = #playerData
     for i = numRows + 1, 5 do
         if frame.PlayerRows[i] then
+            if frame.PlayerRows[i].roleIcon then
+                frame.PlayerRows[i].roleIcon:Hide()
+            end
+            if frame.PlayerRows[i].roleLabel then
+                frame.PlayerRows[i].roleLabel:Hide()
+            end
             frame.PlayerRows[i].frame:Hide()
         end
     end
