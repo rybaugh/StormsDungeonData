@@ -1,20 +1,18 @@
 {
-    "Lua.runtime.version": "Lua 5.1",
-    "Lua.runtime.builtin": {
-        "basic": "disable",
-        "debug": "disable",
-        "io": "disable",
-        "math": "disable",
-        "os": "disable",
-        "package": "disable",
-        "string": "disable",
-        "table": "disable",
-        "utf8": "disable"
-    },
-    "Lua.workspace.library": [
-        "~\\.vscode\\extensions\\ketho.wow-api-0.22.3\\Annotations\\Core"
-    ],
     "Lua.diagnostics.globals": [
+        "COMBATLOG_OBJECT_TYPE_PLAYER",
+        "COMBATLOG_OBJECT_TYPE_PET",
+        "COMBATLOG_OBJECT_TYPE_NPC",
+        "COMBATLOG_OBJECT_CONTROL_PLAYER",
+        "LFGListFrame",
+        "GameTooltip",
+        "ScrollBoxListMixin",
+        "SlashCmdList",
+        "Minimap",
+        "UIParent",
+        "LOCALIZED_CLASS_NAMES_MALE",
+        "GetUnitName",
+        "TooltipDataProcessor",
         "RAID_CLASS_COLORS",
         "UIDropDownMenu_Initialize",
         "UIDropDownMenu_SetSelectedValue",
@@ -32,12 +30,6 @@
         "StaticPopup_Show",
         "UIDropDownMenu_SetAnchor",
         "UIDropDownMenu_CreateInfo",
-        "MouseIsOver",
-        "GetUnitName",
-        "TooltipDataProcessor",
-        "SlashCmdList",
-        "LFGListFrame",
-        "ScrollBoxListMixin",
-        "LOCALIZED_CLASS_NAMES_MALE"
+        "MouseIsOver"
     ]
 }
