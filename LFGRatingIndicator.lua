@@ -7,84 +7,72 @@ if not MPT or not MPT.Database then return end
 local LFGRating = {}
 MPT.LFGRatingIndicator = LFGRating
 
--- Cache our rating indicator frames per search-entry frame (reuse like PGF)
-local ratingIndicators = {}
-
-local function GetLeaderRatingIndicator(parent)
-    local ind = ratingIndicators[parent]
-    if not ind then
-        ind = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        ind:SetPoint("RIGHT", parent, "RIGHT", -4, 0)
-        ind:SetJustifyH("RIGHT")
-        ind:Hide()
-        ratingIndicators[parent] = ind
-    end
-    return ind
-end
-
--- Display count: use stored count, or 1 if they were rated good before we tracked counts
+-- Display count: total good ratings across all runs for this player
 local function GetDisplayGoodCount(playerName)
     if not MPT.Database or not playerName then return 0 end
-    local goodCount = MPT.Database.GetPlayerGoodCount and MPT.Database:GetPlayerGoodCount(playerName) or 0
-    if goodCount > 0 then return goodCount end
-    local rating = MPT.Database.GetPlayerRating and MPT.Database:GetPlayerRating(playerName) or nil
-    return (rating == "good") and 1 or 0
+    return MPT.Database.GetPlayerGoodCount and MPT.Database:GetPlayerGoodCount(playerName) or 0
 end
 
--- Display bad count: use stored count, or 1 if they were rated bad before we tracked counts
+-- Display bad count: total bad ratings across all runs for this player
 local function GetDisplayBadCount(playerName)
     if not MPT.Database or not playerName then return 0 end
-    local badCount = MPT.Database.GetPlayerBadCount and MPT.Database:GetPlayerBadCount(playerName) or 0
-    if badCount > 0 then return badCount end
-    local rating = MPT.Database.GetPlayerRating and MPT.Database:GetPlayerRating(playerName) or nil
-    return (rating == "bad") and 1 or 0
+    return MPT.Database.GetPlayerBadCount and MPT.Database:GetPlayerBadCount(playerName) or 0
 end
 
--- Short text for in-list (fits next to score/crown): "Good +5" and/or "Bad +3"
-local function GetRatingText(leaderName)
-    if not MPT.Database or not leaderName then return nil end
-    local goodCount = GetDisplayGoodCount(leaderName)
-    local badCount = GetDisplayBadCount(leaderName)
-    if goodCount == 0 and badCount == 0 then return nil end
-    local parts = {}
-    if goodCount > 0 then
-        parts[#parts + 1] = "|cff00ff00Good +" .. goodCount .. "|r"
-    end
-    if badCount > 0 then
-        parts[#parts + 1] = "|cffff4444Bad +" .. badCount .. "|r"
-    end
-    return #parts > 0 and table.concat(parts, "  ") or nil
-end
-
--- Update in-list indicator for one search result frame
-local function UpdateSearchEntryIndicator(frame)
-    if not frame or not frame.resultID then return end
-    local info = C_LFGList and C_LFGList.GetSearchResultInfo and C_LFGList.GetSearchResultInfo(frame.resultID)
-    if not info or not info.leader then return end
-    local text = GetRatingText(info.leader)
-    local ind = GetLeaderRatingIndicator(frame)
-    if text then
-        ind:SetText(text)
-        ind:Show()
+local function FormatRatingLine(playerName)
+    local goodCount = GetDisplayGoodCount(playerName)
+    local badCount = GetDisplayBadCount(playerName)
+    local ratingText
+    if goodCount > 0 and badCount > 0 then
+        ratingText = "|cff00ff00+" .. goodCount .. " Good|r / |cffff4444+" .. badCount .. " Bad|r"
+    elseif goodCount > 0 then
+        ratingText = "|cff00ff00+" .. goodCount .. " Good|r"
+    elseif badCount > 0 then
+        ratingText = "|cffff4444+" .. badCount .. " Bad|r"
     else
-        ind:Hide()
+        ratingText = "|cffffffffNo rating yet|r"
     end
+    return ratingText
 end
+
+-- Dedup: track the last resultID we added lines for on this tooltip.
+local sddLastResultID = nil
 
 -- Hook tooltip when hovering a search result (group listing)
 local function OnSearchEntryTooltip(tooltip, resultID, autoAcceptOption)
-    if not resultID or not tooltip or not tooltip.AddLine then return end
+    if not resultID then return end
+    if sddLastResultID == resultID then return end
+    sddLastResultID = resultID
+    if not tooltip or not tooltip.AddLine then return end
     local info = C_LFGList and C_LFGList.GetSearchResultInfo and C_LFGList.GetSearchResultInfo(resultID)
-    if not info or not info.leader then return end
-    local goodCount = GetDisplayGoodCount(info.leader)
-    local badCount = GetDisplayBadCount(info.leader)
-    if goodCount == 0 and badCount == 0 then return end
-    tooltip:AddLine(" ")
-    if goodCount > 0 then
-        tooltip:AddLine("|cff00ff00Storm's Dungeon Data: Good player +" .. goodCount .. "|r")
+    if not info then return end
+
+    -- Gather all members
+    local numMembers = info.numMembers or 0
+    local members = {}
+    if C_LFGList.GetSearchResultMemberInfo then
+        for i = 1, numMembers do
+            local name = C_LFGList.GetSearchResultMemberInfo(resultID, i)
+            if name then
+                members[#members + 1] = name
+            end
+        end
     end
-    if badCount > 0 then
-        tooltip:AddLine("|cffff4444Storm's Dungeon Data: Bad player +" .. badCount .. "|r")
+    -- Fallback to leader only
+    if #members == 0 and info.leaderName then
+        members[1] = info.leaderName
+    end
+    if #members == 0 then return end
+
+    tooltip:AddLine(" ")
+    if #members == 1 then
+        tooltip:AddLine("|cff00ffaaStorm's Dungeon Data:|r " .. FormatRatingLine(members[1]))
+    else
+        tooltip:AddLine("|cff00ffaaStorm's Dungeon Data|r")
+        for _, name in ipairs(members) do
+            local shortName = name:match("^([^%-]+)") or name
+            tooltip:AddLine("  " .. shortName .. ": " .. FormatRatingLine(name))
+        end
     end
     tooltip:Show()
 end
@@ -101,29 +89,11 @@ local function HookApplicantMemberTooltip(memberButton)
         if not applicantID or not memberIdx then return end
         local fullName = C_LFGList and C_LFGList.GetApplicantMemberInfo and C_LFGList.GetApplicantMemberInfo(applicantID, memberIdx)
         if not fullName then return end
-        local goodCount = GetDisplayGoodCount(fullName)
-        local badCount = GetDisplayBadCount(fullName)
-        if goodCount == 0 and badCount == 0 then return end
         if GameTooltip:IsShown() then
-            GameTooltip:AddLine(" ")
-            if goodCount > 0 then
-                GameTooltip:AddLine("|cff00ff00Storm's Dungeon Data: Good player +" .. goodCount .. "|r")
-            end
-            if badCount > 0 then
-                GameTooltip:AddLine("|cffff4444Storm's Dungeon Data: Bad player +" .. badCount .. "|r")
-            end
+            GameTooltip:AddLine("|cff00ffaaStorm's Dungeon Data:|r " .. FormatRatingLine(fullName))
             GameTooltip:Show()
         end
     end)
-end
-
-local function OnSearchPanelFramesChanged(buttons)
-    if not buttons then return end
-    for _, frame in pairs(buttons) do
-        if frame and frame.resultID then
-            UpdateSearchEntryIndicator(frame)
-        end
-    end
 end
 
 local function OnApplicationViewerFramesChanged(buttons)
@@ -139,14 +109,6 @@ local function OnApplicationViewerFramesChanged(buttons)
     end
 end
 
-function LFGRating:RefreshSearchIndicators()
-    if not initialized then return end
-    local searchPanel = LFGListFrame and LFGListFrame.SearchPanel
-    if searchPanel and searchPanel.ScrollBox and searchPanel.ScrollBox.GetFrames then
-        OnSearchPanelFramesChanged(searchPanel.ScrollBox:GetFrames())
-    end
-end
-
 function LFGRating:Initialize()
     if not LFGListFrame then return end
     local searchPanel = LFGListFrame.SearchPanel
@@ -156,39 +118,19 @@ function LFGRating:Initialize()
     -- Tooltip: add our rating line when hovering a group
     hooksecurefunc("LFGListUtil_SetSearchEntryTooltip", OnSearchEntryTooltip)
 
-    -- In-list: show [+] or [-] next to each group row for the leader's rating
-    local scrollBox = searchPanel.ScrollBox
-    local onUpdateEvent = ScrollBoxListMixin and ScrollBoxListMixin.Event and ScrollBoxListMixin.Event.OnUpdate
-    if scrollBox and scrollBox.RegisterCallback and onUpdateEvent then
-        scrollBox:RegisterCallback(onUpdateEvent, function()
-            OnSearchPanelFramesChanged(scrollBox:GetFrames())
-        end)
-        -- Initial pass after a short delay so frames exist
-        C_Timer.After(0.5, function()
-            if scrollBox and scrollBox.GetFrames then
-                OnSearchPanelFramesChanged(scrollBox:GetFrames())
-            end
-        end)
-    end
-
-    -- Refresh indicators when new search results arrive
-    local refreshFrame = CreateFrame("Frame")
-    refreshFrame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED")
-    refreshFrame:RegisterEvent("LFG_LIST_SEARCH_RESULT_UPDATED")
-    refreshFrame:SetScript("OnEvent", function()
-        C_Timer.After(0.1, function()
-            LFGRating:RefreshSearchIndicators()
-        end)
+    -- Reset dedup guard when tooltip is cleared for a new target
+    GameTooltip:HookScript("OnTooltipCleared", function()
+        sddLastResultID = nil
     end)
 
     -- Applicants (when you're leader): add rating to tooltip when hovering an applicant
+    local onUpdateEvent = ScrollBoxListMixin and ScrollBoxListMixin.Event and ScrollBoxListMixin.Event.OnUpdate
     if appViewer and appViewer.ScrollBox and appViewer.ScrollBox.RegisterCallback and onUpdateEvent then
         appViewer.ScrollBox:RegisterCallback(onUpdateEvent, function()
             OnApplicationViewerFramesChanged(appViewer.ScrollBox:GetFrames())
         end)
     end
 
-    print("|cff00ffaa[StormsDungeonData]|r LFG rating indicators enabled (Group Finder)")
 end
 
 -- Run when addon is loaded; LFG frame may not exist yet
@@ -204,7 +146,6 @@ local function TryInit()
 end
 
 if TryInit() then
-    print("|cff00ffaa[StormsDungeonData]|r LFG Rating Indicator module loaded")
     return
 end
 
@@ -219,4 +160,3 @@ waitFrame:SetScript("OnEvent", function(_, event)
     end
 end)
 
-print("|cff00ffaa[StormsDungeonData]|r LFG Rating Indicator module loaded (will activate when Group Finder is used)")

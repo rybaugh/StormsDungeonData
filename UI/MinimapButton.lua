@@ -69,20 +69,11 @@ SDDMinimapButtonMixin = {}
 
 local function OnMinimapClick(_, button)
     if button == "RightButton" then
-        -- Close history so only the scoreboard shows after save
-        if MPT and MPT.HistoryViewer and MPT.HistoryViewer.Hide then
-            MPT.HistoryViewer:Hide()
-        end
-        if MPT and MPT.PerformManualSave then
-            MPT.PerformManualSave("minimap")
-        elseif MPT and MPT.Events and MPT.Events.FinalizeRun then
-            local saved = MPT.Events:FinalizeRun("manual") or false
-            if not saved then
-                print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
-            end
+        if MPT and MPT.LiveTrackerFrame and MPT.LiveTrackerFrame.Toggle then
+            MPT.LiveTrackerFrame:Toggle()
         end
     else
-        -- Close scoreboard so only history shows
+        -- Left click: close scoreboard, show history
         if MPT and MPT.Scoreboard and MPT.Scoreboard.Hide then
             MPT.Scoreboard:Hide()
         end
@@ -122,7 +113,7 @@ local function EnsureMinimapButton()
                     if not tooltip then return end
                     tooltip:AddLine("StormsDungeonData")
                     tooltip:AddLine("Left-click: Open history", 0.2, 1, 0.2)
-                    tooltip:AddLine("Right-click: Save pending run", 0.2, 1, 0.2)
+                    tooltip:AddLine("Right-click: Live dungeon tracker", 0.2, 1, 0.2)
                 end,
             })
         end
@@ -176,7 +167,7 @@ function SDDMinimapButtonMixin:OnLoad()
     end
     self._sddInit = true
 
-    self:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    self:RegisterForClicks("LeftButtonUp", "RightButtonUp", "MiddleButtonUp")
     self:RegisterForDrag("LeftButton")
     self:SetMovable(true)
     self:SetClampedToScreen(true)
@@ -194,7 +185,7 @@ function SDDMinimapButtonMixin:OnLoad()
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:SetText("StormsDungeonData", 1, 1, 1)
         GameTooltip:AddLine("Left-click: Open history", 0.2, 1, 0.2)
-        GameTooltip:AddLine("Right-click: Save pending run", 0.2, 1, 0.2)
+        GameTooltip:AddLine("Right-click: Live dungeon tracker", 0.2, 1, 0.2)
         GameTooltip:AddLine("Drag to reposition", 0.6, 0.8, 1)
         GameTooltip:Show()
     end)
@@ -230,17 +221,8 @@ function SDDMinimapButtonMixin:OnLoad()
 
     self:SetScript("OnClick", function(_, button)
         if button == "RightButton" then
-            if MPT and MPT.HistoryViewer and MPT.HistoryViewer.Hide then
-                MPT.HistoryViewer:Hide()
-            end
-            if MPT and MPT.PerformManualSave then
-                MPT.PerformManualSave("minimap")
-            elseif MPT and MPT.CurrentRunData and MPT.CurrentRunData.completed and not MPT.CurrentRunData.saved then
-                if MPT.Events and MPT.Events.FinalizeRun then
-                    MPT.Events:FinalizeRun("manual")
-                end
-            else
-                print("|cff00ffaa[StormsDungeonData]|r No pending run to save")
+            if MPT and MPT.LiveTrackerFrame and MPT.LiveTrackerFrame.Toggle then
+                MPT.LiveTrackerFrame:Toggle()
             end
         else
             if MPT and MPT.Scoreboard and MPT.Scoreboard.Hide then
@@ -282,7 +264,6 @@ function SDDMinimapButtonMixin:ResetPosition()
     SetAngleOnMinimap(self, angle)
 end
 
-print("|cff00ffaa[StormsDungeonData]|r Minimap button module loaded")
 
 -- Bootstrap in case XML doesn't initialize the button
 if CreateFrame then

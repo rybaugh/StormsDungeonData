@@ -525,4 +525,3 @@ function TestMode:SimulateDungeonRun()
     end
 end
 
-print("|cff00ffaa[StormsDungeonData]|r Test Mode module loaded")

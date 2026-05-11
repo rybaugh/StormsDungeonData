@@ -155,4 +155,3 @@ function Utils:GetDungeonAcronym(dungeonName)
     return acronyms[dungeonName] or dungeonName
 end
 
-print("|cff00ffaa[StormsDungeonData]|r Utils module loaded")

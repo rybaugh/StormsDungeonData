@@ -63,7 +63,7 @@
 6. Run is logged with correct 5 players
 
 ### Player Validation
-When merging stats from Details/C_DamageMeter:
+When merging stats from combat data sources:
 1. Check if player is in `groupMembers` list (captured at start)
 2. If no `groupMembers` data, only add players with combat activity (damage/healing/interrupts > 0)
 3. Final safety: if more than 5 players detected, sort by activity and keep top 5

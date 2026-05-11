@@ -57,7 +57,7 @@ local function CreateBasicMinimapButton(onClick)
         GameTooltip:SetOwner(btn, "ANCHOR_LEFT")
         GameTooltip:SetText("StormsDungeonData", 1, 1, 1)
         GameTooltip:AddLine("Left-click: Open history", 0.2, 1, 0.2)
-        GameTooltip:AddLine("Right-click: Save pending run", 0.2, 1, 0.2)
+        GameTooltip:AddLine("Right-click: Live dungeon tracker", 0.2, 1, 0.2)
         GameTooltip:AddLine("Drag to reposition", 0.6, 0.8, 1)
         GameTooltip:Show()
     end)
@@ -121,6 +121,16 @@ end
 
 -- Shared function for manual save logic (used by both minimap and slash command)
 function MPT.PerformManualSave(source)
+    -- Block duplicate saves while still inside the completed instance.
+    -- RunJustSaved is set on successful FinalizeRun and cleared only when
+    -- the challenge mode actually ends (player leaves the instance).
+    if MPT.RunJustSaved then
+        print("|cff00ffaa[StormsDungeonData]|r Save blocked: run already saved for this instance (source=" .. tostring(source) .. ")")
+        return false
+    end
+    if MPT.Events and MPT.Events.RecordFlow then
+        MPT.Events:RecordFlow("MANUAL_SAVE", "source=" .. tostring(source or "unknown"))
+    end
     print("|cff00ffaa[StormsDungeonData]|r Manual save initiated (" .. (source or "unknown") .. ")...")
     
     -- Check combat tracking status
@@ -136,6 +146,19 @@ function MPT.PerformManualSave(source)
                 end
             end
             print("|cff00ffaa[StormsDungeonData]|r CombatLog has " .. statsCount .. " player entries, hasData=" .. tostring(hasData))
+        end
+    end
+    -- If we have run data, show MVP ranking for each player (debug)
+    if MPT.CurrentRunData and MPT.Scoreboard and MPT.Scoreboard.GetMVPRanking then
+        local ranking = MPT.Scoreboard:GetMVPRanking(MPT.CurrentRunData)
+        if ranking and #ranking > 0 then
+            print("|cff00ffaa[StormsDungeonData]|r MVP ranking (balanced_roles):")
+            for _, row in ipairs(ranking) do
+                local rankLabel = (row.rank == 1) and "MVP #1" or ("#" .. row.rank)
+                local d = row.damage and (row.damage >= 1e6 and string.format("%.2fM", row.damage/1e6) or (row.damage >= 1e3 and string.format("%.1fK", row.damage/1e3) or tostring(row.damage))) or "0"
+                local h = row.healing and (row.healing >= 1e6 and string.format("%.2fM", row.healing/1e6) or (row.healing >= 1e3 and string.format("%.1fK", row.healing/1e3) or tostring(row.healing))) or "0"
+                print(string.format("  %s |cffffcc00%s|r %s dmg=%s heal=%s int=%d score=%.3f", rankLabel, row.name or "?", row.role or "?", d, h, row.interrupts or 0, row.score or 0))
+            end
         end
     end
     
@@ -279,9 +302,15 @@ function MPT.PerformManualSave(source)
         saved = MPT.Events:FinalizeRun("manual") or false
     end
     if saved then
+        if MPT.Events and MPT.Events.RecordFlow then
+            MPT.Events:RecordFlow("MANUAL_SAVE_RESULT", "saved=true source=" .. tostring(source or "unknown"))
+        end
         print("|cff00ffaa[StormsDungeonData]|r Run saved manually!")
         return true
     else
+        if MPT.Events and MPT.Events.RecordFlow then
+            MPT.Events:RecordFlow("MANUAL_SAVE_RESULT", "saved=false source=" .. tostring(source or "unknown"))
+        end
         print("|cff00ffaa[StormsDungeonData]|r No pending run to save - try /sdd test or /sdd force")
         if C_ChallengeMode and C_ChallengeMode.GetCompletionInfo then
             local completionInfo = C_ChallengeMode.GetCompletionInfo()
@@ -303,10 +332,9 @@ function MPT.UI:Initialize()
     
     local function OnMinimapClick(_, button)
         if button == "RightButton" then
-            if MPT.HistoryViewer and MPT.HistoryViewer.Hide then
-                MPT.HistoryViewer:Hide()
+            if MPT.LiveTrackerFrame and MPT.LiveTrackerFrame.Toggle then
+                MPT.LiveTrackerFrame:Toggle()
             end
-            MPT.PerformManualSave("minimap")
         else
             if MPT.Scoreboard and MPT.Scoreboard.Hide then
                 MPT.Scoreboard:Hide()
@@ -346,7 +374,6 @@ function MPT.UI:Initialize()
         end)
     end
     
-    print("|cff00ffaa[StormsDungeonData]|r UI module initialized")
 end
 
 function MPT.UI:ShowScoreboard(runRecord)
@@ -367,26 +394,95 @@ local function HandleSlashCommand(msg, editbox)
 
     if cmd == "history" or cmd == "h" then
         MPT.HistoryViewer:Show()
-    elseif cmd == "save" or cmd == "force" then
-        MPT.PerformManualSave("slash command")
+    elseif cmd == "insights" or cmd == "i" then
+        MPT.HistoryViewer:Show()
+        if MPT.HistoryViewer and MPT.HistoryViewer.SetActivePage then
+            MPT.HistoryViewer:SetActivePage("insights")
+        end
     elseif cmd == "reset" then
         StormsDungeonDataDB = MPT.Database:CreateDefaultDB()
         print("|cff00ffaa[StormsDungeonData]|r Database reset!")
     elseif cmd == "status" then
+        if MPT.Events and MPT.Events.TryBootstrapMythicPlusRun then
+            if not MPT.InMythicPlus then
+                MPT.Events:TryBootstrapMythicPlusRun("status_command", true)
+            end
+        end
+        if MPT.InMythicPlus and MPT.Events and MPT.Events.EnsureCriteriaTrackingForActiveRun then
+            MPT.Events:EnsureCriteriaTrackingForActiveRun("status_command")
+        end
         print("|cff00ffaa[StormsDungeonData]|r Status:")
         print("  Total runs: " .. #StormsDungeonDataDB.runs)
         print("  Current run data exists: " .. tostring(MPT.CurrentRunData ~= nil))
         print("  In mythic plus: " .. tostring(MPT.InMythicPlus or false))
+        if MPT.InMythicPlus then
+            local recovered = (MPT.RunBootstrapRecovered == true)
+            local reason = MPT.RunBootstrapReason or "none"
+            local atTs = MPT.RunBootstrapAt or "n/a"
+            print("  Bootstrap recovered this run: " .. tostring(recovered) .. " (reason=" .. tostring(reason) .. ", at=" .. tostring(atTs) .. ")")
+        end
         if MPT.CurrentRunData then
             print("  Current run: " .. tostring(MPT.CurrentRunData.dungeonName) .. " +" .. tostring(MPT.CurrentRunData.keystoneLevel))
             print("  Completed: " .. tostring(MPT.CurrentRunData.completed))
             print("  Saved: " .. tostring(MPT.CurrentRunData.saved))
         end
-        print("  Type |cff00ffaa/sdd history|r to view history")
+        if MPT.RunCompletionRequirements then
+            local req = MPT.RunCompletionRequirements
+            local bossCount = tonumber(req.bossCount) or 0
+            local mapID = tonumber(req.mapID) or 0
+            local reqForces = tonumber(req.enemyForcesRequiredPercent) or 100
+            print("  Completion requirements: mapID=" .. tostring(mapID) .. ", bosses=" .. tostring(bossCount) .. ", enemyForces>=" .. tostring(reqForces) .. "%")
+        end
+        if MPT.RunCompletionProgress then
+            local p = MPT.RunCompletionProgress
+            local bossesKilled = tonumber(p.bossesKilled) or 0
+            local bossCount = tonumber(p.bossCount) or 0
+            local bossesRemaining = tonumber(p.bossesRemaining) or math.max(0, bossCount - bossesKilled)
+            local forcesPct = tonumber(p.forcesPercent) or 0
+            local forcesRemaining = tonumber(p.enemyForcesRemainingPercent) or math.max(0, 100 - forcesPct)
+            local pollRate = (MPT.Events and MPT.Events.criteriaCompletionPollInterval) or "n/a"
+            print(string.format("  Completion progress: bosses=%d/%d (remaining=%d), enemyForces=%.1f%% (remaining=%.1f%%)", bossesKilled, bossCount, bossesRemaining, forcesPct, forcesRemaining))
+            print("  Completion ready: bosses=" .. tostring(p.allBossesKilled) .. ", enemyForces=" .. tostring(p.forcesAtRequired) .. ", poll=" .. tostring(pollRate) .. "s")
+        elseif MPT.InMythicPlus then
+            print("  Completion progress: unavailable (waiting for scenario criteria data)")
+        end
+        print("  Type |cff00ffaa/sdd debug|r for player MVP ranking, |cff00ffaa/sdd history|r to view history")
+    elseif cmd == "debug" then
+        if not MPT.CurrentRunData then
+            print("|cff00ffaa[StormsDungeonData]|r No current run data. Use |cff00ffaa/sdd save|r after a key or during a run to build run data, then /sdd debug.")
+            return
+        end
+        print("|cff00ffaa[StormsDungeonData]|r Debug - " .. tostring(MPT.CurrentRunData.dungeonName) .. " +" .. tostring(MPT.CurrentRunData.keystoneLevel))
+        if MPT.Scoreboard and MPT.Scoreboard.GetMVPRanking then
+            local ranking = MPT.Scoreboard:GetMVPRanking(MPT.CurrentRunData)
+            if ranking and #ranking > 0 then
+                print("|cff00ffaa[StormsDungeonData]|r MVP ranking (balanced_roles) for each player:")
+                for _, row in ipairs(ranking) do
+                    local rankLabel = (row.rank == 1) and "MVP #1" or ("#" .. row.rank)
+                    local d = row.damage and (row.damage >= 1e6 and string.format("%.2fM", row.damage/1e6) or (row.damage >= 1e3 and string.format("%.1fK", row.damage/1e3) or tostring(math.floor(row.damage)))) or "0"
+                    local h = row.healing and (row.healing >= 1e6 and string.format("%.2fM", row.healing/1e6) or (row.healing >= 1e3 and string.format("%.1fK", row.healing/1e3) or tostring(math.floor(row.healing)))) or "0"
+                    print(string.format("  %s |cffffcc00%s|r %s  dmg=%s  heal=%s  int=%d  score=%.3f", rankLabel, row.name or "?", row.role or "?", d, h, row.interrupts or 0, row.score or 0))
+                end
+            else
+                print("|cff00ffaa[StormsDungeonData]|r No players in run data for MVP ranking.")
+            end
+        else
+            print("|cff00ffaa[StormsDungeonData]|r Scoreboard/GetMVPRanking not available.")
+        end
     elseif cmd == "test" then
         print("|cff00ffaa[StormsDungeonData]|r Testing completion detection...")
         if MPT.Events and MPT.Events.OnChallengeModeCompleted then
             MPT.Events:OnChallengeModeCompleted()
+        end
+    elseif cmd == "log" then
+        if rest == "clear" or rest == "reset" then
+            if MPT.Log then MPT.Log:Clear() end
+            print("|cff00ffaa[StormsDungeonData]|r Log cleared.")
+        elseif rest == "file" then
+            if MPT.Log then MPT.Log:WriteToFile() end
+        else
+            local n = tonumber(rest)
+            if MPT.Log then MPT.Log:DumpToChat(n or 100) end
         end
     elseif cmd == "events" then
         print("|cff00ffaa[StormsDungeonData]|r Testing event registration...")
@@ -413,13 +509,26 @@ local function HandleSlashCommand(msg, editbox)
                 end
             end
         end
+    elseif cmd == "flow" then
+        local n = tonumber(rest) or 30
+        if MPT.Events and MPT.Events.DumpFlowTrace then
+            MPT.Events:DumpFlowTrace(n)
+        else
+            print("|cff00ffaa[StormsDungeonData]|r Flow trace is unavailable.")
+        end
     elseif cmd == "" or cmd == "help" then
         print("|cff00ffaa[StormsDungeonData]|r Commands:")
         print("  |cff00ffaa/sdd history|r - Show run history")
-        print("  |cff00ffaa/sdd save|r - Manually save pending run")
+        print("  |cff00ffaa/sdd insights|r - Show season insights")
         print("  |cff00ffaa/sdd status|r - Show addon status")
+        print("  |cff00ffaa/sdd debug|r - Show current run players with MVP ranking")
+        print("  |cff00ffaa/sdd log|r - Show last 100 action log lines (why run did/didn't save)")
+        print("  |cff00ffaa/sdd log 500|r - Show last 500 lines")
+        print("  |cff00ffaa/sdd log clear|r - Clear the log")
+        print("  |cff00ffaa/sdd log file|r - Try to write log to file")
         print("  |cff00ffaa/sdd test|r - Test completion detection")
         print("  |cff00ffaa/sdd events|r - Test event registration")
+        print("  |cff00ffaa/sdd flow [n]|r - Show recent event/save flow timeline")
         print("  |cff00ffaa/sdd reset|r - Reset database")
         print("  |cff00ffaa/sdd help|r - Show this message")
     else
@@ -435,4 +544,3 @@ if SlashCmdList then
     SlashCmdList.STORMSDUNGEONDATA = HandleSlashCommand
 end
 
-print("|cff00ffaa[StormsDungeonData]|r Main module loaded")

@@ -1,217 +1,171 @@
 -- Combat Log File Monitor
--- Monitors the WoW combat log file for key events to auto-detect run start/end
--- Detects CHALLENGE_MODE_START and Hearthstone usage for automatic run logging
+-- Polls game state to auto-detect M+ run start/end and Hearthstone usage.
+--
+-- WoW 12+ broke ALL event-registration paths for addons:
+--   Frame:RegisterEvent()                         – protected
+--   EventRegistry:RegisterFrameEventAndCallback() – internally calls Frame:RegisterEvent()
+--   EventUtil.ContinueOnEvent()                   – internally calls Frame:RegisterEvent()
+--
+-- We therefore avoid every event-registration API entirely and instead use
+-- C_Timer.NewTicker to poll C_ChallengeMode and UnitCastingInfo on a short interval.
+-- This is fully allowed in WoW 12+ and requires no frame or event registration.
 
 local MPT = StormsDungeonData
 MPT.CombatLogFileMonitor = MPT.CombatLogFileMonitor or {}
 local Monitor = MPT.CombatLogFileMonitor
 
 -- Configuration
-Monitor.enabled = true
-Monitor.checkInterval = 2  -- Check log file every 2 seconds
-Monitor.lastFileSize = 0
-Monitor.currentDungeon = nil
-Monitor.lastZoneBeforeHearthstone = nil
-Monitor.isMonitoring = false
-Monitor.ticker = nil
+Monitor.enabled       = true
+Monitor.checkInterval = 0.5   -- Poll interval in seconds
+Monitor.isMonitoring  = false
+Monitor.ticker        = nil
 
--- Get the most recent combat log file
-function Monitor:GetMostRecentCombatLog()
-    local wowPath = string.gsub(GetCVar("portal"), "([^/\\]+)$", "")  -- Remove executable name
-    wowPath = wowPath .. "Logs"
-    
-    -- Alternative: Try to construct path from known WoW directory structure
-    if not wowPath or wowPath == "" then
-        -- Try to find the WoW directory by checking common install locations
-        local possiblePaths = {
-            "C:\\Program Files (x86)\\World of Warcraft\\_retail_\\Logs\\",
-            "C:\\Program Files\\World of Warcraft\\_retail_\\Logs\\",
-        }
-        
-        for _, path in ipairs(possiblePaths) do
-            -- We can't actually check file existence from Lua, but we can try to use it
-            wowPath = path
-            break
-        end
-    end
-    
-    -- Return the logs directory path
-    -- In practice, we'll need to scan this directory for WoWCombatLog-*.txt files
-    -- and find the most recent one based on the timestamp in the filename
-    return wowPath
+-- Runtime state
+Monitor.currentDungeon             = nil   -- Set when an M+ key is active
+Monitor.lastZoneBeforeHearthstone  = nil
+Monitor.lastActiveMapID            = nil   -- Tracks C_ChallengeMode map between ticks
+Monitor.hearthstoneCastID          = nil   -- castID of the Hearthstone we are tracking
+
+-- ─── Hearthstone detection helpers ───────────────────────────────────────────
+
+-- Hearthstone and its variants all contain "Hearthstone" in the English locale
+-- spell name. We match case-insensitively to be safe.
+local HEARTHSTONE_PATTERN = "[Hh]earthstone"
+
+local function IsHearthstoneSpell(spellName)
+    return spellName and spellName:find(HEARTHSTONE_PATTERN) ~= nil
 end
 
--- Parse a combat log line for events we care about
-function Monitor:ParseLogLine(line)
-    if not line or line == "" then
-        return nil
-    end
-    
-    -- Check for CHALLENGE_MODE_START
-    -- Format: DATE TIME  CHALLENGE_MODE_START,"DungeonName",mapID,instanceID,keystoneLevel,[affixes]
-    local dungeonName, mapID, instanceID, keystoneLevel = line:match('CHALLENGE_MODE_START,"([^"]+)",(%d+),(%d+),(%d+)')
-    if dungeonName and mapID and keystoneLevel then
-        return {
-            event = "CHALLENGE_MODE_START",
-            dungeonName = dungeonName,
-            mapID = tonumber(mapID),
-            instanceID = tonumber(instanceID),
-            keystoneLevel = tonumber(keystoneLevel),
-            timestamp = line:match("^([%d/]+%s+[%d:%.%-]+)")
-        }
-    end
-    
-    -- Check for Hearthstone spell cast
-    -- Format: DATE TIME  SPELL_CAST_SUCCESS,...,"SpellName",...
-    if line:match("SPELL_CAST_SUCCESS") then
-        local spellName = line:match('SPELL_CAST_SUCCESS,[^,]+,"[^"]*",.-,"([^"]*Hearthstone[^"]*)"')
-        if spellName then
-            return {
-                event = "HEARTHSTONE_CAST",
-                spellName = spellName,
-                timestamp = line:match("^([%d/]+%s+[%d:%.%-]+)")
-            }
-        end
-    end
-    
-    return nil
-end
+-- ─── Per-tick poll ────────────────────────────────────────────────────────────
 
--- Process a detected event
-function Monitor:ProcessEvent(eventData)
-    if not eventData then
-        return
-    end
-    
-    if eventData.event == "CHALLENGE_MODE_START" then
-        print("|cff00ffaa[StormsDungeonData]|r Combat Log: Detected M+ start - " .. eventData.dungeonName .. " +" .. eventData.keystoneLevel)
-        
-        -- Store current dungeon info
+function Monitor:Tick()
+    -- ── 1. Challenge-mode change detection ──────────────────────────────────
+    local activeMapID = C_ChallengeMode.GetActiveChallengeMapID()
+
+    if activeMapID and activeMapID ~= self.lastActiveMapID then
+        -- A new M+ key just became active (or the map changed).
+        self.lastActiveMapID = activeMapID
+
+        local keystoneLevel = select(1, C_ChallengeMode.GetActiveKeystoneInfo()) or 0
+        local cmName        = C_ChallengeMode.GetMapUIInfo and select(1, C_ChallengeMode.GetMapUIInfo(activeMapID))
+        local dungeonName   = (type(cmName) == "string" and cmName ~= "" and cmName) or ("Map " .. activeMapID)
+
+        MPT.Log:Info("M+ started – " .. dungeonName .. " +" .. keystoneLevel)
+
         self.currentDungeon = {
-            name = eventData.dungeonName,
-            mapID = eventData.mapID,
-            keystoneLevel = eventData.keystoneLevel,
-            startTime = time(),
+            name          = dungeonName,
+            mapID         = activeMapID,
+            keystoneLevel = keystoneLevel,
+            startTime     = time(),
         }
-        
-        -- Ensure combat tracking is started
+        self.lastZoneBeforeHearthstone = dungeonName
+
+        -- Auto-start combat tracking if not already running.
         if MPT.CombatLog and MPT.CombatLog.StartTracking and not MPT.CombatLog.isTracking then
-            print("|cff00ffaa[StormsDungeonData]|r Auto-starting combat tracking from log file detection")
+            MPT.Log:Info("Auto-starting combat tracking")
             MPT.CombatLog:StartTracking()
         end
-        
-        -- Store the zone before we entered the dungeon
-        self.lastZoneBeforeHearthstone = eventData.dungeonName
-        
-    elseif eventData.event == "HEARTHSTONE_CAST" then
-        print("|cff00ffaa[StormsDungeonData]|r Combat Log: Detected Hearthstone cast - " .. eventData.spellName)
-        
-        -- Check if we have a current dungeon and it matches the last zone
-        if self.currentDungeon and self.lastZoneBeforeHearthstone then
-            if self.currentDungeon.name == self.lastZoneBeforeHearthstone then
-                print("|cff00ffaa[StormsDungeonData]|r Auto-logging run: " .. self.currentDungeon.name .. " +" .. self.currentDungeon.keystoneLevel)
-                
-                -- Trigger auto-save with a small delay to ensure all data is captured
-                C_Timer.After(1, function()
-                    if MPT.PerformManualSave then
-                        MPT.PerformManualSave("hearthstone_auto")
-                    elseif MPT.Events and MPT.Events.FinalizeRun then
-                        MPT.Events:FinalizeRun("hearthstone_auto")
-                    end
-                end)
-            else
-                print("|cff00ffaa[StormsDungeonData]|r Skipping auto-log: Current dungeon (" .. self.currentDungeon.name .. ") doesn't match last zone (" .. self.lastZoneBeforeHearthstone .. ")")
-            end
-        else
-            print("|cff00ffaa[StormsDungeonData]|r No active dungeon to log")
+
+    elseif not activeMapID and self.lastActiveMapID then
+        -- The active challenge ended (timer expired, key completed, or left instance).
+        self.lastActiveMapID = nil
+        self:OnChallengeModeEnded()
+    end
+
+    -- ── 2. Hearthstone cast detection ───────────────────────────────────────
+    -- UnitCastingInfo returns: name, text, texture, startMs, endMs, isTradeSkill,
+    --                          castID, notInterruptible, spellID
+    local castName, _, _, _, _, _, castID = UnitCastingInfo("player")
+
+    if castName and IsHearthstoneSpell(castName) then
+        if castID ~= self.hearthstoneCastID then
+            -- New Hearthstone cast started; record it.
+            self.hearthstoneCastID = castID
         end
-        
-        -- Clear current dungeon after hearthstone
-        self.currentDungeon = nil
+    else
+        if self.hearthstoneCastID then
+            -- The tracked Hearthstone cast finished or was cancelled.
+            -- Fire optimistically; the dungeon-match guard in OnHearthstoneUsed
+            -- decides whether to actually save.
+            self:OnHearthstoneUsed()
+            self.hearthstoneCastID = nil
+        end
     end
 end
 
--- Monitor the combat log file using a ticker (periodic check)
--- Since we can't directly read files from Lua in WoW, we'll use a different approach:
--- We'll hook into the existing COMBAT_LOG_EVENT_UNFILTERED to catch these events
+-- ─── State-change handlers ────────────────────────────────────────────────────
+
+function Monitor:OnChallengeModeEnded()
+    self.currentDungeon    = nil
+    self.hearthstoneCastID = nil
+end
+
+function Monitor:OnHearthstoneUsed()
+    MPT.Log:Info("Detected Hearthstone cast completion")
+
+    if self.currentDungeon and self.lastZoneBeforeHearthstone then
+        if self.currentDungeon.name == self.lastZoneBeforeHearthstone then
+            MPT.Log:Info("Auto-logging run: "
+                  .. self.currentDungeon.name .. " +" .. self.currentDungeon.keystoneLevel)
+
+            -- Small delay so any last combat events are captured first.
+            C_Timer.After(1, function()
+                if MPT.PerformManualSave then
+                    MPT.PerformManualSave("hearthstone_auto")
+                elseif MPT.Events and MPT.Events.FinalizeRun then
+                    MPT.Events:FinalizeRun("hearthstone_auto")
+                end
+            end)
+        else
+            MPT.Log:Info("Skipping auto-log: dungeon ("
+                  .. self.currentDungeon.name .. ") doesn't match last zone ("
+                  .. self.lastZoneBeforeHearthstone .. ")")
+        end
+    else
+        MPT.Log:Info("No active dungeon to log")
+    end
+
+    self.currentDungeon = nil
+end
+
+-- ─── Monitoring lifecycle ─────────────────────────────────────────────────────
+
 function Monitor:StartMonitoring()
     if self.isMonitoring then
-        print("|cff00ffaa[StormsDungeonData]|r Combat log file monitoring already active")
+        MPT.Log:Info("Combat log monitoring already active")
         return
     end
-    
-    self.isMonitoring = true
-    
-    -- Register for combat log events
-    if not self.frame then
-        self.frame = CreateFrame("Frame")
-    end
-    
-    self.frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
-    
-    self.frame:SetScript("OnEvent", function(frame, event, ...)
-        if event == "COMBAT_LOG_EVENT_UNFILTERED" then
-            Monitor:OnCombatLogEvent(...)
-        end
-    end)
-    
-    print("|cff00ffaa[StormsDungeonData]|r Combat log file monitoring started")
-end
 
--- Handle combat log events directly from the game (more reliable than file parsing)
-function Monitor:OnCombatLogEvent(...)
-    local timestamp, eventType, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, 
-          destGUID, destName, destFlags, destRaidFlags = CombatLogGetCurrentEventInfo()
-    
-    -- Check for CHALLENGE_MODE_START - this is typically sent as a ENCOUNTER_START or similar
-    -- Actually, we need to check if this is passed through the subevent
-    if eventType == "CHALLENGE_MODE_START" then
-        -- This event type doesn't exist in standard CLEU, but we handle it if it appears
-        local dungeonName, mapID, instanceID, keystoneLevel = select(12, CombatLogGetCurrentEventInfo())
-        if dungeonName then
-            self:ProcessEvent({
-                event = "CHALLENGE_MODE_START",
-                dungeonName = dungeonName,
-                mapID = mapID,
-                keystoneLevel = keystoneLevel,
-            })
-        end
-    end
-    
-    -- Check for Hearthstone spell casts
-    if eventType == "SPELL_CAST_SUCCESS" then
-        local spellID, spellName = select(12, CombatLogGetCurrentEventInfo())
-        
-        if spellName and spellName:match("Hearthstone") then
-            -- Check if this is the player casting
-            if sourceGUID == UnitGUID("player") then
-                self:ProcessEvent({
-                    event = "HEARTHSTONE_CAST",
-                    spellName = spellName,
-                })
-            end
-        end
-    end
+    -- Snapshot current challenge-mode state so the first tick doesn't false-fire.
+    self.lastActiveMapID   = C_ChallengeMode.GetActiveChallengeMapID()
+    self.hearthstoneCastID = nil
+
+    -- C_Timer.NewTicker does NOT use Frame:RegisterEvent() internally.
+    -- It is safe to call from any addon context in WoW 12+.
+    self.ticker = C_Timer.NewTicker(self.checkInterval, function()
+        self:Tick()
+    end)
+
+    self.isMonitoring = true
 end
 
 function Monitor:StopMonitoring()
     if not self.isMonitoring then
         return
     end
-    
-    self.isMonitoring = false
-    
-    if self.frame then
-        self.frame:UnregisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+
+    if self.ticker then
+        self.ticker:Cancel()
+        self.ticker = nil
     end
-    
-    print("|cff00ffaa[StormsDungeonData]|r Combat log file monitoring stopped")
+
+    self.isMonitoring = false
+    MPT.Log:Info("Combat log monitoring stopped")
 end
 
 function Monitor:Initialize()
     if self.enabled then
         self:StartMonitoring()
-        print("|cff00ffaa[StormsDungeonData]|r Combat Log File Monitor initialized")
     end
 end
 

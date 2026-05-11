@@ -87,6 +87,16 @@ function UIUtils:RGBToHex(r, g, b)
     return string.format("%02x%02x%02x", r * 255, g * 255, b * 255)
 end
 
+-- Compute an appropriate window scale so frames fit on the player's screen.
+-- Uses UIParent's effective virtual dimensions vs. the 1920x1080 design baseline.
+-- Returns a value clamped between 0.55 and 1.0.
+function UIUtils:ComputeWindowScale()
+    local sw = UIParent:GetWidth()
+    local sh = UIParent:GetHeight()
+    local scale = math.min(sw / 1920, sh / 1080)
+    return math.max(0.55, math.min(1.0, scale))
+end
+
 -- Get WoW color strings
 function UIUtils:GetRoleIcon(role)
     local icons = {
@@ -135,7 +145,7 @@ function UIUtils:CreateMinimapButton(name, icon, onclick)
                         if not tooltip then return end
                         tooltip:AddLine("StormsDungeonData")
                         tooltip:AddLine("Left-click: Open history", 0.2, 1, 0.2)
-                        tooltip:AddLine("Right-click: Save pending run", 0.2, 1, 0.2)
+                        tooltip:AddLine("Right-click: Live dungeon tracker", 0.2, 1, 0.2)
                     end,
                 })
             else
@@ -189,7 +199,7 @@ function UIUtils:CreateMinimapButton(name, icon, onclick)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:SetText("Run History", 1, 1, 1)
         GameTooltip:AddLine("Left-click: Open history", 0.2, 1, 0.2)
-        GameTooltip:AddLine("Right-click: Save pending run", 0.2, 1, 0.2)
+        GameTooltip:AddLine("Right-click: Live dungeon tracker", 0.2, 1, 0.2)
         GameTooltip:AddLine("Drag to reposition", 0.6, 0.8, 1)
         GameTooltip:Show()
     end)
@@ -265,4 +275,3 @@ function UIUtils:CreateMinimapButton(name, icon, onclick)
     return btn
 end
 
-print("|cff00ffaa[StormsDungeonData]|r UI Utils module loaded")
