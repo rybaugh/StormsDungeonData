@@ -1,0 +1,45 @@
+<Ui xsi:schemaLocation="http://www.blizzard.com/wow/ui/..\FrameXML\UI.xsd">
+	<Script file="MinimapButton.lua"/>
+
+	<Frame name="StormsDungeonDataMinimapButtonContainer" parent="UIParent" frameStrata="LOW">
+		<Size x="8" y="8"/>
+		<Anchors>
+			<Anchor point="CENTER" relativeTo="Minimap" relativePoint="CENTER"/>
+		</Anchors>
+		<Scripts>
+			<OnLoad>
+				Minimap:HookScript("OnHide", function() self:Hide() end);
+				Minimap:HookScript("OnShow", function() self:Show() end);
+			</OnLoad>
+		</Scripts>
+	</Frame>
+
+	<Button name="StormsDungeonDataMinimapButton" parent="StormsDungeonDataMinimapButtonContainer" enableMouse="true" movable="true" hidden="false" frameStrata="LOW" frameLevel="62" ignoreParentAlpha="false" clampedToScreen="true" motionScriptsWhileDisabled="false" useParentLevel="false" mixin="SDDMinimapButtonMixin">
+		<Size>
+			<AbsDimension x="32" y="32"/>
+		</Size>
+		<Anchors>
+			<Anchor point="CENTER" relativeTo="Minimap" relativePoint="BOTTOM"/>
+		</Anchors>
+		<HitRectInsets>
+			<AbsInset left="6" right="6" top="5" bottom="5"/>
+		</HitRectInsets>
+		<Layers>
+			<Layer level="ARTWORK">
+				<Texture parentKey="Icon" hidden="false">
+					<Size>
+						<AbsDimension x="20" y="20"/>
+					</Size>
+					<Anchors>
+						<Anchor point="CENTER"/>
+					</Anchors>
+				</Texture>
+			</Layer>
+		</Layers>
+		<Scripts>
+			<OnLoad>
+				self:OnLoad();
+			</OnLoad>
+		</Scripts>
+	</Button>
+</Ui>
