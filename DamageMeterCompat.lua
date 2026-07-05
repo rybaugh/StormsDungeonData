@@ -193,6 +193,14 @@ local function SafeMapGet(map, key)
 end
 
 local function ToPlainString(value)
+    if value == nil then
+        return nil
+    end
+    -- Midnight 12.0+ provides a global ToPlainString that properly handles secret strings.
+    -- Use it when available; fall back to tostring on older builds where secret strings don't exist.
+    if _G.ToPlainString then
+        return _G.ToPlainString(value)
+    end
     return tostring(value)
 end
 
