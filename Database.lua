@@ -8,6 +8,7 @@ local LEGACY_SEASON_MIGRATION_FLAG = "legacySeasonAssignedOnce"
 local LEGACY_TIMED_RESULT_MIGRATION_FLAG = "legacyTimedResultBackfilledOnce"
 local LEGACY_TIMED_RESULT_MIGRATION_V2_FLAG = "legacyTimedResultBackfilledV2"
 local LEGACY_TWW_SEASON_REMIGRATION_FLAG = "twwSeasonAbsoluteIDMigrationV1"
+local LEGACY_INTERRUPT_DOUBLE_COUNT_FIX_FLAG = "interruptDoubleCountFixV1"
 
 local function GetCurrentSeasonMigrationData()
     local seasonID = nil
@@ -192,6 +193,57 @@ end
 function MPT.Database:ApplyOneTimeLegacyTimedResultBackfill()
     -- V1 migration (keystoneUpgrades-based) is superseded by V2 below; this is kept as a
     -- no-op stub so old saved-variable flags don't cause errors.
+end
+
+-- Fixes a bug where FinalizeNewAPIData ran twice per run (FinalizeRun called it directly,
+-- then CombatLog:StopTracking called it again right after) and interrupts were accumulated
+-- with += instead of assigned with =, like damage/healing are. Every Midnight-era (WoW 12.0+,
+-- C_DamageMeter) run recorded before the fix has its interrupt counts doubled. Halves them
+-- for every player entry on every affected run, once.
+function MPT.Database:ApplyOneTimeInterruptDoubleCountFix()
+    if not StormsDungeonDataDB then
+        return
+    end
+    StormsDungeonDataDB.settings = StormsDungeonDataDB.settings or {}
+    if StormsDungeonDataDB.settings[LEGACY_INTERRUPT_DOUBLE_COUNT_FIX_FLAG] then
+        return
+    end
+
+    local runs = StormsDungeonDataDB.runs or {}
+    local updatedRunCount = 0
+    local updatedPlayerCount = 0
+
+    for _, run in ipairs(runs) do
+        -- Only Midnight-era runs used the C_DamageMeter code path that had this bug.
+        if not run.deleted and run.expansionAbbrev == "Midnight" then
+            local touchedThisRun = false
+            if run.players then
+                for _, p in ipairs(run.players) do
+                    if type(p) == "table" and type(p.interrupts) == "number" and p.interrupts > 0 then
+                        p.interrupts = math.floor(p.interrupts / 2 + 0.5)
+                        touchedThisRun = true
+                        updatedPlayerCount = updatedPlayerCount + 1
+                    end
+                end
+            end
+            if run.playerStats then
+                for _, pstats in pairs(run.playerStats) do
+                    if type(pstats) == "table" and type(pstats.interrupts) == "number" and pstats.interrupts > 0 then
+                        pstats.interrupts = math.floor(pstats.interrupts / 2 + 0.5)
+                        touchedThisRun = true
+                    end
+                end
+            end
+            if touchedThisRun then
+                updatedRunCount = updatedRunCount + 1
+            end
+        end
+    end
+
+    StormsDungeonDataDB.settings[LEGACY_INTERRUPT_DOUBLE_COUNT_FIX_FLAG] = true
+    if updatedRunCount > 0 then
+        print("|cff00ffaa[StormsDungeonData]|r Fixed doubled interrupt counts on " .. tostring(updatedRunCount) .. " run(s), " .. tostring(updatedPlayerCount) .. " player entries.")
+    end
 end
 
 function MPT.Database:ApplyOneTimeLegacyTimedResultBackfillV2()
@@ -382,6 +434,7 @@ function MPT.Database:Initialize()
     self:ApplyOneTimeTWWSeasonIDRemigration()        -- fix relative→absolute TWW season IDs
     self:ApplyOneTimeLegacyTimedResultBackfill()    -- stub; kept for saved-var compat
     self:ApplyOneTimeLegacyTimedResultBackfillV2()  -- correct Midnight-era mis-tags
+    self:ApplyOneTimeInterruptDoubleCountFix()      -- halve doubled interrupts (FinalizeNewAPIData ran twice)
 end
 
 -- Aggregate good rating count from all run records (one vote per run per player)

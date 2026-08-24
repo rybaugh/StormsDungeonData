@@ -455,38 +455,36 @@ function DamageMeterCompat:GetInterruptData()
         end
     end
 
-    -- Always iterate every individual session so that interrupts from all pulls
-    -- are captured regardless of whether the Overall session is complete.
-    -- The Overall session can be incomplete for interrupts when a resummoned pet's
-    -- earlier sessions are not aggregated — individual sessions are authoritative.
-    local hasIndividualSessions = false
-    if C_DamageMeter and C_DamageMeter.GetAvailableCombatSessions
-            and C_DamageMeter.GetCombatSessionFromID
-            and Enum and Enum.DamageMeterType then
-        local rawSessions = C_DamageMeter.GetAvailableCombatSessions()
-        if rawSessions and #rawSessions > 0 then
-            hasIndividualSessions = true
-            for _, s in ipairs(rawSessions) do
-                local sid = NormalizeSessionID(s.sessionID)
-                if sid then
-                    local sess = C_DamageMeter.GetCombatSessionFromID(sid, Enum.DamageMeterType.Interrupts)
-                    if sess and sess.combatSources then
-                        mergeSources(sess.combatSources)
-                    end
-                end
-            end
+    -- Primary: use the Overall session, same as damage/healing/dispels. The Overall
+    -- session already aggregates every individual pull, so summing individual sessions
+    -- on top of it double-counts every interrupt.
+    if C_DamageMeter and C_DamageMeter.GetCombatSessionFromType and Enum and Enum.DamageMeterSessionType then
+        local overallSession = C_DamageMeter.GetCombatSessionFromType(
+            Enum.DamageMeterSessionType.Overall,
+            Enum.DamageMeterType.Interrupts
+        )
+        if overallSession and overallSession.combatSources then
+            mergeSources(overallSession.combatSources)
         end
     end
 
-    -- Fallback: use Overall session when individual sessions are unavailable.
-    if not hasIndividualSessions then
-        if C_DamageMeter and C_DamageMeter.GetCombatSessionFromType and Enum and Enum.DamageMeterSessionType then
-            local overallSession = C_DamageMeter.GetCombatSessionFromType(
-                Enum.DamageMeterSessionType.Overall,
-                Enum.DamageMeterType.Interrupts
-            )
-            if overallSession and overallSession.combatSources then
-                mergeSources(overallSession.combatSources)
+    -- Fallback: Overall was unavailable/empty (e.g. restricted mid-run). Sum individual
+    -- sessions instead so interrupts from all pulls are still captured.
+    if not next(interruptData) then
+        if C_DamageMeter and C_DamageMeter.GetAvailableCombatSessions
+                and C_DamageMeter.GetCombatSessionFromID
+                and Enum and Enum.DamageMeterType then
+            local rawSessions = C_DamageMeter.GetAvailableCombatSessions()
+            if rawSessions and #rawSessions > 0 then
+                for _, s in ipairs(rawSessions) do
+                    local sid = NormalizeSessionID(s.sessionID)
+                    if sid then
+                        local sess = C_DamageMeter.GetCombatSessionFromID(sid, Enum.DamageMeterType.Interrupts)
+                        if sess and sess.combatSources then
+                            mergeSources(sess.combatSources)
+                        end
+                    end
+                end
             end
         end
         -- Last resort: single most-recent session ID.
