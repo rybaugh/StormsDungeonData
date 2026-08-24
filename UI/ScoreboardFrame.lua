@@ -22,17 +22,17 @@ MPT.Scoreboard = Scoreboard
 -- specID reference: https://warcraft.wiki.gg/wiki/SpecializationID
 local SPEC_MVP_WEIGHTS = {
     -- Death Knight (no dispel)
-    [250] = { 0.65, 0.35, 0.65, 0.00 }, -- Blood (tank)
-    [251] = { 0.90, 0.10, 0.55, 0.00 }, -- Frost (DPS)
-    [252] = { 0.90, 0.10, 0.55, 0.00 }, -- Unholy (DPS)
+    [250] = { 0.67, 0.33, 0.40, 0.00 }, -- Blood (tank)
+    [251] = { 0.92, 0.08, 0.55, 0.00 }, -- Frost (DPS)
+    [252] = { 0.92, 0.08, 0.55, 0.00 }, -- Unholy (DPS)
     -- Demon Hunter (no dispel)
     [577]  = { 0.90, 0.10, 0.55, 0.00 }, -- Havoc (DPS)      – 15s Disrupt
-    [581]  = { 0.80, 0.20, 0.65, 0.00 }, -- Vengeance (tank)
+    [581]  = { 0.80, 0.20, 0.40, 0.00 }, -- Vengeance (tank)
     [1480] = { 0.90, 0.10, 0.55, 0.00 }, -- Devourer (DPS)   – interrupt CD assumed 15s
     -- Druid
     [102] = { 0.90, 0.10, 0.35, 0.05 }, -- Balance (DPS)      – Solar Beam 60s; Remove Corruption
     [103] = { 0.90, 0.10, 0.55, 0.05 }, -- Feral (DPS)        – Skull Bash 15s; Remove Corruption
-    [104] = { 0.80, 0.20, 0.65, 0.10 }, -- Guardian (tank)    – Remove Corruption
+    [104] = { 0.80, 0.20, 0.40, 0.10 }, -- Guardian (tank)    – Remove Corruption
     [105] = { 0.28, 0.72, 0.00, 0.08 }, -- Restoration (heal) – Nature's Cure
     -- Evoker
     [1467] = { 0.90, 0.10, 0.65, 0.00 }, -- Devastation (DPS)    – Quell 40s; no dispel
@@ -47,12 +47,12 @@ local SPEC_MVP_WEIGHTS = {
     [63] = { 0.90, 0.10, 0.45, 0.05 }, -- Fire (DPS)
     [64] = { 0.90, 0.10, 0.45, 0.05 }, -- Frost (DPS)
     -- Monk
-    [268] = { 0.85, 0.15, 0.65, 0.00 }, -- Brewmaster (tank)   – no dispel
+    [268] = { 0.85, 0.15, 0.40, 0.00 }, -- Brewmaster (tank)   – no dispel
     [269] = { 0.90, 0.10, 0.55, 0.00 }, -- Windwalker (DPS)    – no dispel
     [270] = { 0.28, 0.72, 0.00, 0.08 }, -- Mistweaver (heal)   – Detox
     -- Paladin
     [65] = { 0.28, 0.72, 0.00, 0.08 }, -- Holy (heal)         – Cleanse
-    [66] = { 0.80, 0.20, 0.55, 0.10 }, -- Protection (tank)   – Avenger's Shield / Rebuke
+    [66] = { 0.80, 0.20, 0.35, 0.10 }, -- Protection (tank)   – Avenger's Shield / Rebuke
     [70] = { 0.90, 0.10, 0.55, 0.05 }, -- Retribution (DPS)   – Cleanse Toxins
     -- Priest
     [256] = { 0.28, 0.72, 0.00, 0.08 }, -- Discipline (heal) – Dispel Magic + Mass Dispel
@@ -73,32 +73,32 @@ local SPEC_MVP_WEIGHTS = {
     -- Warrior (no dispel)
     [71] = { 0.90, 0.10, 0.55, 0.00 }, -- Arms
     [72] = { 0.90, 0.10, 0.55, 0.00 }, -- Fury
-    [73] = { 0.80, 0.20, 0.65, 0.00 }, -- Protection
+    [73] = { 0.80, 0.20, 0.40, 0.00 }, -- Protection
 }
 
 -- Per-class fallback weights when specID is unavailable. { dmg, heal, int, disp }
 -- dmg + heal sums to 1.0 to match spec table fairness constraint.
 local CLASS_MVP_WEIGHTS = {
-    DEATHKNIGHT  = { TANK = { 0.80, 0.20, 0.65, 0.00 }, HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
-    DEMONHUNTER  = { TANK = { 0.80, 0.20, 0.65, 0.00 }, HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
-    DRUID        = { TANK = { 0.80, 0.20, 0.65, 0.10 }, HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.10, 0.45, 0.05 } },
+    DEATHKNIGHT  = { TANK = { 0.82, 0.18, 0.40, 0.00 }, HEALER = nil,                   DAMAGER = { 0.92, 0.08, 0.55, 0.00 } },
+    DEMONHUNTER  = { TANK = { 0.80, 0.20, 0.40, 0.00 }, HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
+    DRUID        = { TANK = { 0.80, 0.20, 0.40, 0.10 }, HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.10, 0.45, 0.05 } },
     EVOKER       = { TANK = nil,                         HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.10, 0.65, 0.00 } },
     HUNTER       = { TANK = nil,                         HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.45, 0.00 } },
     MAGE         = { TANK = nil,                         HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.45, 0.05 } },
-    MONK         = { TANK = { 0.80, 0.20, 0.65, 0.00 }, HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
-    PALADIN      = { TANK = { 0.80, 0.20, 0.55, 0.10 }, HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.10, 0.55, 0.05 } },
+    MONK         = { TANK = { 0.80, 0.20, 0.40, 0.00 }, HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
+    PALADIN      = { TANK = { 0.80, 0.20, 0.35, 0.10 }, HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.10, 0.55, 0.05 } },
     PRIEST       = { TANK = nil,                         HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.10, 0.35, 0.05 } },
     ROGUE        = { TANK = nil,                         HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
     SHAMAN       = { TANK = nil,                         HEALER = { 0.28, 0.72, 0.00, 0.08 }, DAMAGER = { 0.90, 0.15, 0.60, 0.05 } },
     WARLOCK      = { TANK = nil,                         HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
-    WARRIOR      = { TANK = { 0.80, 0.20, 0.65, 0.00 }, HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
+    WARRIOR      = { TANK = { 0.80, 0.20, 0.40, 0.00 }, HEALER = nil,                   DAMAGER = { 0.90, 0.10, 0.55, 0.00 } },
 }
 
 -- Role-only fallback weights (no class/spec data available). { dmg, heal, int, disp }
 -- dmg + heal sums to 1.0 to match spec table fairness constraint.
 local ROLE_MVP_WEIGHTS = {
     HEALER  = { 0.28, 0.72, 0.00, 0.08 },
-    TANK    = { 0.80, 0.20, 0.65, 0.05 },
+    TANK    = { 0.80, 0.20, 0.40, 0.05 },
     DAMAGER = { 0.90, 0.10, 0.55, 0.05 },
 }
 
@@ -165,10 +165,10 @@ local function MVPScoreBalancedRoles(role, dmgShare, healShare, intShare, deaths
         baseScore = baseScore * 1.06
     end
 
-    -- Penalties: each death reduces score by 8%, avoidable damage share subtracts proportionally
-    local avoidablePenalty = avoidableShare * 0.35
+    -- Penalties: each death reduces score by 8%, avoidable damage scales score down proportionally
+    local avoidableMultiplier = math.max(0.70, 1 - (avoidableShare * 0.25))
     local deathMultiplier = (1 - 0.08) ^ deaths
-    return math.max(0, (baseScore - avoidablePenalty) * deathMultiplier)
+    return math.max(0, baseScore * avoidableMultiplier * deathMultiplier)
 end
 
 local TANK_CAPABLE_CLASSES = {

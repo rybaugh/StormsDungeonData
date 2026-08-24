@@ -427,6 +427,12 @@ function CombatLog:FinalizeNewAPIData()
         interruptData = nil
     end
     if interruptData then
+        -- C_DamageMeter is the authoritative source once available, so its totals must
+        -- overwrite (not add to) whatever the CLEU fallback already tallied during the run
+        -- (allowCLEUFallback keeps CombatLog:OnInterrupt running alongside C_DamageMeter).
+        -- Accumulate locally first since a pet and its owner can both appear as separate
+        -- rows in interruptData and resolve to the same shortName.
+        local interruptTotals = {}
         for playerName, stats in pairs(interruptData) do
             local resolvedName = playerName
             local sourceGUID = type(stats) == "table" and (stats.sourceGUID or stats.guid) or nil
@@ -485,13 +491,12 @@ function CombatLog:FinalizeNewAPIData()
                         avoidableDamageTaken = 0,
                     }
                 end
-                -- interrupts, like damage/healing above, is a cumulative total from the
-                -- Overall C_DamageMeter session (see DamageMeterCompat:GetInterruptData).
-                -- FinalizeNewAPIData can run twice for the same run (FinalizeRun calls it
-                -- directly, then CombatLog:StopTracking calls it again) — assign rather
-                -- than accumulate so a repeat call doesn't double-count interrupts.
-                self.playerStats[shortName].interrupts = stats.interrupts or 0
+                interruptTotals[shortName] = (interruptTotals[shortName] or 0) + (stats.interrupts or 0)
             end
+        end
+
+        for shortName, total in pairs(interruptTotals) do
+            self.playerStats[shortName].interrupts = total
         end
     end
 
@@ -840,13 +845,22 @@ function CombatLog:OnUnitPetChanged(ownerUnitID)
     local rawOwnerName, rawOwnerRealm = UnitName(ownerUnitID)
     local ownerN = ToPlainString(rawOwnerName)
     local ownerR = ToPlainString(rawOwnerRealm)
-    if ownerR and ownerR ~= "" then
+    -- ownerR may be a "secret string" for cross-realm units in tainted execution
+    -- (tostring does not strip the secret flag). Comparing it directly (ownerR ~= "")
+    -- hard-errors, so guard with pcall the same way Events.lua refreshPetSlot does.
+    local ownerRNonEmpty = ownerR and (function()
+        local ok, ne = pcall(function() return ownerR ~= "" end)
+        return ok and ne
+    end)()
+    if ownerN and ownerRNonEmpty then
         ownerN = ownerN .. "-" .. ownerR
     end
     if not ownerN then return end
 
-    -- Prefer the full Name-Realm form stored from the roster scan
-    if NormalizeUnitName(ownerN) == nil then
+    -- Prefer the full Name-Realm form stored from the roster scan.
+    -- NormalizeUnitName runs string methods that also error on secret strings, so pcall it.
+    local okNorm, normalized = pcall(NormalizeUnitName, ownerN)
+    if okNorm and normalized == nil then
         local short = ownerN
         local upgraded = self.fullNameByShort and self.fullNameByShort[short]
         if upgraded then ownerN = upgraded end

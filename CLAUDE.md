@@ -1,12 +1,12 @@
 # StormsDungeonData — Agent Context
 
 ## Overview
-**Storm's Dungeon Data** (v1.4) is a World of Warcraft addon for Mythic+ dungeon performance tracking.  
+**Storm's Dungeon Data** (v2.3) is a World of Warcraft addon for Mythic+ dungeon performance tracking.  
 It records damage, healing, interrupts, deaths, and run metadata for every Mythic+ key, stores them
 persistently, and provides a history viewer, live DPS/HPS chart, post-run scoreboard, player rating
 system, and LFG tooltip integration.
 
-- **Interface**: 120000–120005 (The War Within / Midnight era)
+- **Interface**: 120000–120005, 120100 (The War Within / Midnight era)
 - **Global namespace**: `StormsDungeonData` (aliased as `MPT` in every file)
 - **SavedVariables**: `StormsDungeonDataDB`, `StormsDungeonDataLog`
 - **Slash commands**: `/sdd` or `/stormsdungeondata`
