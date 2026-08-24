@@ -485,7 +485,12 @@ function CombatLog:FinalizeNewAPIData()
                         avoidableDamageTaken = 0,
                     }
                 end
-                self.playerStats[shortName].interrupts = (self.playerStats[shortName].interrupts or 0) + (stats.interrupts or 0)
+                -- interrupts, like damage/healing above, is a cumulative total from the
+                -- Overall C_DamageMeter session (see DamageMeterCompat:GetInterruptData).
+                -- FinalizeNewAPIData can run twice for the same run (FinalizeRun calls it
+                -- directly, then CombatLog:StopTracking calls it again) — assign rather
+                -- than accumulate so a repeat call doesn't double-count interrupts.
+                self.playerStats[shortName].interrupts = stats.interrupts or 0
             end
         end
     end
