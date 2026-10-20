@@ -91,16 +91,23 @@ function LiveTracker:GetCurrentTotalsPerPlayer()
             local mappedName = name
             if MPT.CombatLog and type(stats) == "table" then
                 local sourceGUID = stats.sourceGUID or stats.guid
-                if sourceGUID ~= nil then
+                if MPT.DamageMeterCompat.IsSecret(sourceGUID) then
+                    sourceGUID = nil
+                elseif sourceGUID ~= nil then
                     sourceGUID = tostring(sourceGUID)
                 end
 
                 -- Prefer GUID ownership when available.
-                local ownerName = sourceGUID and MPT.CombatLog.petOwnerNameByGUID and MPT.CombatLog.petOwnerNameByGUID[sourceGUID] or nil
+                local ownerName = nil
+                if sourceGUID and MPT.CombatLog.petOwnerNameByGUID then
+                    local ok, v = pcall(function() return MPT.CombatLog.petOwnerNameByGUID[sourceGUID] end)
+                    if ok then ownerName = v end
+                end
 
                 -- Fallback for GUID-less pet entries from C_DamageMeter.
                 if (not ownerName or ownerName == "") and type(name) == "string" and MPT.CombatLog.petOwnerByPetName then
-                    ownerName = MPT.CombatLog.petOwnerByPetName[name]
+                    local ok, v = pcall(function() return MPT.CombatLog.petOwnerByPetName[name] end)
+                    if ok then ownerName = v end
                 end
 
                 -- Disabled: scanning live pet units can hit protected/secret strings in tainted execution.

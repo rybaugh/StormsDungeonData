@@ -2330,12 +2330,19 @@ function Events:OnEvent(event, ...)
         elseif event == "PLAYER_REGEN_DISABLED" then
             -- Enter combat: record session start elapsed for DPS/HPS session tracking
             if MPT.LiveTracker and MPT.LiveTracker.OnEnterCombat then
-                MPT.LiveTracker:OnEnterCombat()
+                local ok, err = pcall(MPT.LiveTracker.OnEnterCombat, MPT.LiveTracker)
+                if not ok then
+                    L("ERROR", "LiveTracker:OnEnterCombat failed: " .. tostring(err))
+                end
             end
         elseif event == "PLAYER_REGEN_ENABLED" then
             -- Exit combat: record point-in-time snapshot for live dungeon tracker
+            -- pcall so a live-tracker error can't block the deferred FinalizeRun below.
             if MPT.LiveTracker and MPT.LiveTracker.OnExitCombat then
-                MPT.LiveTracker:OnExitCombat()
+                local ok, err = pcall(MPT.LiveTracker.OnExitCombat, MPT.LiveTracker)
+                if not ok then
+                    L("ERROR", "LiveTracker:OnExitCombat failed: " .. tostring(err))
+                end
             end
 
             -- If a run finalization was deferred due to being in combat, execute it now.
@@ -3040,7 +3047,9 @@ function Events:FinalizeRun(reason)
             for name, data in pairs(interruptData) do
                 local sourceName = name
                 local sourceGUID = type(data) == "table" and (data.sourceGUID or data.guid) or nil
-                if sourceGUID ~= nil then
+                if MPT.DamageMeterCompat.IsSecret(sourceGUID) then
+                    sourceGUID = nil
+                elseif sourceGUID ~= nil then
                     sourceGUID = tostring(sourceGUID)
                 end
                 if MPT.CombatLog then
