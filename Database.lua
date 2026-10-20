@@ -9,6 +9,7 @@ local LEGACY_TIMED_RESULT_MIGRATION_FLAG = "legacyTimedResultBackfilledOnce"
 local LEGACY_TIMED_RESULT_MIGRATION_V2_FLAG = "legacyTimedResultBackfilledV2"
 local LEGACY_TWW_SEASON_REMIGRATION_FLAG = "twwSeasonAbsoluteIDMigrationV1"
 local LEGACY_INTERRUPT_DOUBLE_COUNT_FIX_FLAG = "interruptDoubleCountFixV1"
+local STAR_RATING_MIGRATION_FLAG = "starRatingMigrationV1"
 
 local function GetCurrentSeasonMigrationData()
     local seasonID = nil
@@ -391,9 +392,6 @@ function MPT.Database:CreateDefaultDB()
         version = 1,
         runs = {},  -- List of all runs across all characters
         characters = {},  -- Character metadata
-        playerRatings = {},  -- [playerNameKey] = "good" | "bad" (for non-user players in runs)
-        playerRatingGoodCount = {},  -- [playerNameKey] = number of times rated good
-        playerRatingBadCount = {},   -- [playerNameKey] = number of times rated bad
         settings = {
             autoShowScoreboard = true,
             playerTooltipEnabled = false,
@@ -420,54 +418,48 @@ function MPT.Database:Initialize()
     if StormsDungeonDataDB.settings.playerTooltipEnabled == nil then
         StormsDungeonDataDB.settings.playerTooltipEnabled = false
     end
-    if not StormsDungeonDataDB.playerRatings then
-        StormsDungeonDataDB.playerRatings = {}
-    end
-    if not StormsDungeonDataDB.playerRatingGoodCount then
-        StormsDungeonDataDB.playerRatingGoodCount = {}
-    end
-    if not StormsDungeonDataDB.playerRatingBadCount then
-        StormsDungeonDataDB.playerRatingBadCount = {}
-    end
 
     self:ApplyOneTimeLegacySeasonAssignment()
     self:ApplyOneTimeTWWSeasonIDRemigration()        -- fix relative→absolute TWW season IDs
     self:ApplyOneTimeLegacyTimedResultBackfill()    -- stub; kept for saved-var compat
     self:ApplyOneTimeLegacyTimedResultBackfillV2()  -- correct Midnight-era mis-tags
     self:ApplyOneTimeInterruptDoubleCountFix()      -- halve doubled interrupts (FinalizeNewAPIData ran twice)
+    self:ApplyOneTimeStarRatingMigration()          -- good/bad run ratings become 5/1 stars
 end
 
--- Aggregate good rating count from all run records (one vote per run per player)
-function MPT.Database:GetPlayerGoodCount(playerName)
-    if not StormsDungeonDataDB then return 0 end
-    local key = self:GetPlayerRatingKey(playerName)
-    if not key then return 0 end
-    local count = 0
+-- Player ratings are 1-5 stars, one per player per run (run.playerRatings[key]).
+-- Runs saved before stars existed hold "good"/"bad"; those read as 5 and 1.
+MPT.Database.RATING_MAX_STARS = 5
+
+function MPT.Database:NormalizeStars(value)
+    if value == "good" then return 5 end
+    if value == "bad" then return 1 end
+    if type(value) ~= "number" then return nil end
+    local stars = math.floor(value + 0.5)
+    if stars < 1 then return nil end
+    return math.min(stars, self.RATING_MAX_STARS)
+end
+
+-- Average stars and number of rated runs for a player across all non-deleted runs.
+-- Returns average (nil when unrated), count.
+function MPT.Database:GetPlayerRatingSummary(playerName)
+    return self:GetRatingSummaryByKey(self:GetPlayerRatingKey(playerName))
+end
+
+-- Same as GetPlayerRatingSummary for an already-normalized rating key.
+function MPT.Database:GetRatingSummaryByKey(key)
+    if not StormsDungeonDataDB or not key then return nil, 0 end
+    local total, count = 0, 0
     for _, run in ipairs(StormsDungeonDataDB.runs or {}) do
-        if run.playerRatings and run.playerRatings[key] == "good" then
+        local stars = (not run.deleted) and run.playerRatings and self:NormalizeStars(run.playerRatings[key])
+        if stars then
+            total = total + stars
             count = count + 1
         end
     end
-    return count
+    if count == 0 then return nil, 0 end
+    return total / count, count
 end
-
--- Aggregate bad rating count from all run records (one vote per run per player)
-function MPT.Database:GetPlayerBadCount(playerName)
-    if not StormsDungeonDataDB then return 0 end
-    local key = self:GetPlayerRatingKey(playerName)
-    if not key then return 0 end
-    local count = 0
-    for _, run in ipairs(StormsDungeonDataDB.runs or {}) do
-        if run.playerRatings and run.playerRatings[key] == "bad" then
-            count = count + 1
-        end
-    end
-    return count
-end
-
--- Kept for backward compatibility (no longer used for counting)
-function MPT.Database:IncrementPlayerGoodCount(playerName) return true end
-function MPT.Database:IncrementPlayerBadCount(playerName) return true end
 
 -- Normalize player name for rating key (case-insensitive, full name-realm)
 function MPT.Database:GetPlayerRatingKey(playerName)
@@ -481,58 +473,66 @@ function MPT.Database:GetPlayerRatingKey(playerName)
     return name
 end
 
-function MPT.Database:GetPlayerRating(playerName)
-    if not StormsDungeonDataDB or not StormsDungeonDataDB.playerRatings then return nil end
-    local key = self:GetPlayerRatingKey(playerName)
-    return key and StormsDungeonDataDB.playerRatings[key] or nil
-end
-
-function MPT.Database:SetPlayerRating(playerName, rating)
-    if not StormsDungeonDataDB then return false end
-    if not StormsDungeonDataDB.playerRatings then
-        StormsDungeonDataDB.playerRatings = {}
-    end
-    local key = self:GetPlayerRatingKey(playerName)
-    if not key then return false end
-    if rating == "good" or rating == "bad" then
-        StormsDungeonDataDB.playerRatings[key] = rating
-        return true
-    end
-    StormsDungeonDataDB.playerRatings[key] = nil
-    return true
-end
-
--- Get the rating for a specific player within a specific run (per-run, not global)
-function MPT.Database:GetRunPlayerRating(runID, playerName)
-    if not StormsDungeonDataDB or not runID or not playerName then return nil end
-    local key = self:GetPlayerRatingKey(playerName)
-    if not key then return nil end
-    for _, run in ipairs(StormsDungeonDataDB.runs or {}) do
-        if run.id == runID then
-            return run.playerRatings and run.playerRatings[key] or nil
-        end
+local function FindRun(runID)
+    for _, run in ipairs((StormsDungeonDataDB and StormsDungeonDataDB.runs) or {}) do
+        if run.id == runID then return run end
     end
     return nil
 end
 
--- Set (or clear) the rating for a specific player within a specific run.
--- rating = "good"|"bad"|nil  (nil clears the rating)
-function MPT.Database:SetRunPlayerRating(runID, playerName, rating)
+-- Get the star rating (1-5 or nil) for a specific player within a specific run
+function MPT.Database:GetRunPlayerRating(runID, playerName)
+    if not StormsDungeonDataDB or not runID or not playerName then return nil end
+    local key = self:GetPlayerRatingKey(playerName)
+    local run = key and FindRun(runID)
+    return run and run.playerRatings and self:NormalizeStars(run.playerRatings[key]) or nil
+end
+
+-- Set (or clear) the star rating for a specific player within a specific run.
+-- stars = 1-5, or nil to clear.
+function MPT.Database:SetRunPlayerRating(runID, playerName, stars)
     if not StormsDungeonDataDB or not runID or not playerName then return false end
     local key = self:GetPlayerRatingKey(playerName)
-    if not key then return false end
+    local run = key and FindRun(runID)
+    if not run then return false end
+    run.playerRatings = run.playerRatings or {}
+    run.playerRatings[key] = self:NormalizeStars(stars)
+    return true
+end
+
+-- The 5-star whisper goes out once per player per run, even if the rating is toggled.
+function MPT.Database:WasRatingWhisperSent(runID, playerName)
+    local key = self:GetPlayerRatingKey(playerName)
+    local run = key and FindRun(runID)
+    return (run and run.ratingWhispers and run.ratingWhispers[key]) and true or false
+end
+
+function MPT.Database:MarkRatingWhisperSent(runID, playerName)
+    local key = self:GetPlayerRatingKey(playerName)
+    local run = key and FindRun(runID)
+    if not run then return end
+    run.ratingWhispers = run.ratingWhispers or {}
+    run.ratingWhispers[key] = true
+end
+
+-- Converts every stored "good"/"bad" run rating to stars (5 and 1), once.
+function MPT.Database:ApplyOneTimeStarRatingMigration()
+    if not StormsDungeonDataDB then return end
+    StormsDungeonDataDB.settings = StormsDungeonDataDB.settings or {}
+    if StormsDungeonDataDB.settings[STAR_RATING_MIGRATION_FLAG] then return end
+    local converted = 0
     for _, run in ipairs(StormsDungeonDataDB.runs or {}) do
-        if run.id == runID then
-            if not run.playerRatings then run.playerRatings = {} end
-            if rating == "good" or rating == "bad" then
-                run.playerRatings[key] = rating
-            else
-                run.playerRatings[key] = nil
+        for key, value in pairs(run.playerRatings or {}) do
+            if type(value) == "string" then
+                run.playerRatings[key] = self:NormalizeStars(value)
+                converted = converted + 1
             end
-            return true
         end
     end
-    return false
+    StormsDungeonDataDB.settings[STAR_RATING_MIGRATION_FLAG] = true
+    if MPT.Log then
+        MPT.Log:Info("ApplyOneTimeStarRatingMigration: converted=" .. tostring(converted))
+    end
 end
 
 -- Create a new run record

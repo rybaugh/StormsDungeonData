@@ -6,7 +6,9 @@ local Utils = MPT.Utils
 
 -- String formatting helpers
 function Utils:FormatNumber(num)
-    if num >= 1000000 then
+    if num >= 1000000000 then
+        return string.format("%.2fB", num / 1000000000)
+    elseif num >= 1000000 then
         return string.format("%.2fM", num / 1000000)
     elseif num >= 1000 then
         return string.format("%.2fK", num / 1000)
@@ -30,6 +32,18 @@ function Utils:FormatDuration(seconds)
     else
         return string.format("%02d:%02d", minutes, secs)
     end
+end
+
+-- Star rating text for tooltips, e.g. "[star] 4.3/5 (7 runs)", colored by average.
+-- Takes plain numbers so tainted tooltip callbacks can call it safely.
+local STAR_ICON = "|TInterface\\AddOns\\StormsDungeonData\\Media\\Star:12:12:0:0:64:64:0:64:0:64:255:191:71|t"
+
+function Utils:FormatStarSummary(average, count)
+    if not average or not count or count == 0 then
+        return "|cffffffffNo rating yet|r"
+    end
+    local color = (average >= 4 and "5fd38d") or (average >= 2.5 and "ffbf47") or "ff6b6b"
+    return string.format("%s |cff%s%.1f/5|r (%d %s)", STAR_ICON, color, average, count, count == 1 and "run" or "runs")
 end
 
 -- Table utilities

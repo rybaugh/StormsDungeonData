@@ -89,26 +89,32 @@ local function RunIsFailed(run)
     return false
 end
 
--- Helper function to set backdrop compatibility with WoW 12.0+
-local function SetBackdropCompat(frame, backdropInfo, backdropColor, backdropBorderColor)
-    if frame.SetBackdrop then
-        -- Legacy API (pre-12.0)
-        frame:SetBackdrop(backdropInfo)
-        if backdropColor then
-            frame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], backdropColor[4])
-        end
-        if backdropBorderColor then
-            frame:SetBackdropBorderColor(backdropBorderColor[1], backdropBorderColor[2], backdropBorderColor[3], backdropBorderColor[4])
-        end
-    elseif frame.SetBackdropInfo then
-        -- New API (WoW 12.0+)
-        frame:SetBackdropInfo(backdropInfo)
-        if backdropColor then
-            frame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], backdropColor[4])
-        end
-        if backdropBorderColor then
-            frame:SetBackdropBorderColor(backdropBorderColor[1], backdropBorderColor[2], backdropBorderColor[3], backdropBorderColor[4])
-        end
+-- Themed replacement for the old Blizzard backdrops. Neutral grey colors map to
+-- the theme's surface/line; tinted colors (tier list, class chips) are kept.
+local function IsNeutral(c)
+    return c and math.abs(c[1] - c[2]) < 0.03 and math.abs(c[2] - c[3]) < 0.06
+end
+
+local function SetBackdropCompat(frame, _, backdropColor, backdropBorderColor)
+    local Theme = MPT.Theme
+    Theme:Panel(frame, "surface", "line")
+    if backdropColor and not IsNeutral(backdropColor) then
+        frame.SDDFill:SetVertexColor(backdropColor[1], backdropColor[2], backdropColor[3], backdropColor[4] or 1)
+    end
+    if backdropBorderColor and not IsNeutral(backdropBorderColor) then
+        frame.SDDBorder:SetVertexColor(backdropBorderColor[1], backdropBorderColor[2], backdropBorderColor[3], backdropBorderColor[4] or 1)
+    end
+end
+
+local function OpenRunScoreboardFromHistory(historyViewer, run)
+    if not historyViewer or not run then
+        return
+    end
+    historyViewer:Hide()
+    if MPT.UI and MPT.UI.ShowScoreboard then
+        MPT.UI:ShowScoreboard(run)
+    elseif MPT.Scoreboard and MPT.Scoreboard.Show then
+        MPT.Scoreboard:Show(run)
     end
 end
 
@@ -119,7 +125,7 @@ HistoryViewer.selectedKeystoneLevel = nil
 HistoryViewer.selectedResult = nil
 HistoryViewer.selectedRole = nil
 -- Multi-select storage (tables instead of single values)
-HistoryViewer.selectedDungeons = {}  -- {[dungeonID] = true}
+HistoryViewer.selectedDungeons = {}  -- {[dungeonName] = true}
 HistoryViewer.selectedKeystoneLevels = {}  -- {[level] = true}
 HistoryViewer.selectedResults = {}  -- {[true/false] = true}
 -- Hierarchical class/spec/hero filters
@@ -600,6 +606,21 @@ function HistoryViewer:BuildInsightsData()
         return nil
     end
 
+    -- The season's dungeon pool, taken before character scoping so a dungeon the
+    -- selected character never ran still counts as a rating gap.
+    local seasonDungeons = {}
+    do
+        local seen = {}
+        for _, run in ipairs(runs) do
+            local name = run.dungeonName
+            if name and not seen[name] then
+                seen[name] = true
+                table.insert(seasonDungeons, name)
+            end
+        end
+        table.sort(seasonDungeons)
+    end
+
     -- Insights can be scoped to a single character via Character filter.
     if self.selectedCharacter then
         local selectedName, selectedRealm = strsplit("-", self.selectedCharacter)
@@ -771,7 +792,8 @@ function HistoryViewer:BuildInsightsData()
     local function EnsureDungeon(run)
         local dungeonID = run.dungeonID or run.dungeonId or 0
         local dungeonName = run.dungeonName or "Unknown"
-        local key = tostring(dungeonID) .. "::" .. dungeonName
+        -- Keyed by name: the same dungeon can be saved under more than one map ID
+        local key = dungeonName
         if not dungeons[key] then
             dungeons[key] = {
                 key = key,
@@ -1044,6 +1066,7 @@ function HistoryViewer:BuildInsightsData()
                             key = metric.key,
                             label = metric.label,
                             role = ownerRole,
+                            inverse = metric.inverseMetric or false,
                             comparedRuns = 0,
                             belowCount = 0,
                             significantlyBelowCount = 0,
@@ -1336,7 +1359,7 @@ function HistoryViewer:BuildInsightsData()
                         local runDuration = run.duration or 0
                         local dungeonID = run.dungeonID or run.dungeonId or 0
                         local dungeonName = run.dungeonName or "Unknown"
-                        local dungeonKey = tostring(dungeonID) .. "::" .. dungeonName
+                        local dungeonKey = dungeonName
                         byDungeon[dungeonKey] = byDungeon[dungeonKey] or {}
                         table.insert(byDungeon[dungeonKey], {
                             damage = (metricGettersByKey.damage and metricGettersByKey.damage(ownerStats, runDuration)) or 0,
@@ -1534,11 +1557,23 @@ function HistoryViewer:BuildInsightsData()
         gap.avgDelta = AverageFromSum(gap.deltaSum, gap.comparedRuns)
         gap.ownerAvg = AverageFromSum(gap.ownerSum, gap.comparedRuns)
         gap.teammateAvg = AverageFromSum(gap.teammateSum, gap.comparedRuns)
-        gap.ratioToTeam = (gap.teammateAvg and gap.teammateAvg > 0) and (gap.ownerAvg / gap.teammateAvg) or 1
-        if (gap.comparedRuns or 0) >= 3 and (gap.significantlyBelowRate or 0) >= 0.5 and (gap.avgDelta or 0) < 0 then
+        -- For deaths and avoidable damage a higher value is worse, so flip the sign and the
+        -- ratio: performanceDelta < 0 and ratioToTeam < 1 always mean "behind the role".
+        local direction = gap.inverse and -1 or 1
+        gap.performanceDelta = gap.avgDelta * direction
+        if gap.inverse then
+            if gap.ownerAvg > 0 then
+                gap.ratioToTeam = gap.teammateAvg / gap.ownerAvg
+            else
+                gap.ratioToTeam = 2
+            end
+        else
+            gap.ratioToTeam = (gap.teammateAvg and gap.teammateAvg > 0) and (gap.ownerAvg / gap.teammateAvg) or 1
+        end
+        if (gap.comparedRuns or 0) >= 3 and (gap.significantlyBelowRate or 0) >= 0.5 and gap.performanceDelta < 0 then
             table.insert(underperformingMetrics, gap)
         end
-        if (gap.comparedRuns or 0) >= 3 and (gap.significantlyAboveRate or 0) >= 0.5 and (gap.avgDelta or 0) > 0 then
+        if (gap.comparedRuns or 0) >= 3 and (gap.significantlyAboveRate or 0) >= 0.5 and gap.performanceDelta > 0 then
             table.insert(outperformingMetrics, gap)
         end
     end
@@ -1546,13 +1581,13 @@ function HistoryViewer:BuildInsightsData()
         if (a.significantlyBelowRate or 0) ~= (b.significantlyBelowRate or 0) then
             return (a.significantlyBelowRate or 0) > (b.significantlyBelowRate or 0)
         end
-        return (a.avgDelta or 0) < (b.avgDelta or 0)
+        return (a.ratioToTeam or 1) < (b.ratioToTeam or 1)
     end)
     table.sort(outperformingMetrics, function(a, b)
         if (a.significantlyAboveRate or 0) ~= (b.significantlyAboveRate or 0) then
             return (a.significantlyAboveRate or 0) > (b.significantlyAboveRate or 0)
         end
-        return (a.avgDelta or 0) > (b.avgDelta or 0)
+        return (a.ratioToTeam or 1) > (b.ratioToTeam or 1)
     end)
 
     local overallTimeline = BuildTimeline(weeklyByOverall)
@@ -1622,78 +1657,27 @@ function HistoryViewer:BuildInsightsData()
         end
     end
 
-    local recommendations = {}
-
-    -- Priority 1: Role-specific performance gaps first, deduped by metric family
-    local gapFamilyOrder = {"healing", "damage", "interrupts"}
-    local gapFamilyByMetric = {
-        healing = "healing",
-        hps = "healing",
-        damage = "damage",
-        dps = "damage",
-        interrupts = "interrupts",
-    }
-    local bestGapByFamily = {}
-    local function IsGapStronger(a, b)
-        if not b then return true end
-        if (a.significantlyBelowRate or 0) ~= (b.significantlyBelowRate or 0) then
-            return (a.significantlyBelowRate or 0) > (b.significantlyBelowRate or 0)
-        end
-        if (a.belowRate or 0) ~= (b.belowRate or 0) then
-            return (a.belowRate or 0) > (b.belowRate or 0)
-        end
-        return (a.avgDelta or 0) < (b.avgDelta or 0)
-    end
-    for _, metric in ipairs(underperformingMetrics) do
-        local family = gapFamilyByMetric[metric.key]
-        if family and IsGapStronger(metric, bestGapByFamily[family]) then
-            bestGapByFamily[family] = metric
-        end
-    end
-    for _, family in ipairs(gapFamilyOrder) do
-        local metric = bestGapByFamily[family]
-        if metric then
-            table.insert(recommendations, string.format(
-                "Role-specific gap (%s %s): below comparable average in %d%% of runs (%d%% significantly below).",
-                metric.role or "UNKNOWN",
-                metric.label or metric.key or "Metric",
-                math.floor((metric.belowRate or 0) * 100 + 0.5),
-                math.floor((metric.significantlyBelowRate or 0) * 100 + 0.5)
-            ))
-        end
-    end
-
-    -- Remaining recommendations
-    for i, p in ipairs(painPoints) do
-        if i > 3 then break end
-        if p.runs >= 3 then
-            table.insert(recommendations, string.format(
-                "Focus %s next: %d%% fail rate, avg %.1fs time lost, avg %.1f deaths.",
-                p.dungeonName or "Unknown",
-                math.floor((p.failRate or 0) * 100 + 0.5),
-                p.avgTimeLost or 0,
-                p.avgDeaths or 0
-            ))
-        end
-    end
-    if #trendsPerCharacter > 0 and trendsPerCharacter[#trendsPerCharacter] then
-        local slowest = trendsPerCharacter[#trendsPerCharacter]
-        -- Only recommend route/planning review when both key level and completion trend are down,
-        -- and the character isn't already completing most keys.
-        local completionRate = slowest.completionRate or 0
-        if (slowest.trend.deltaTimedLevel or 0) < 0 
-            and (slowest.trend.deltaCompletionRate or 0) < 0 
-            and completionRate < 0.95 then
-            table.insert(recommendations, string.format(
-                "Review route/planning on %s-%s: timed key trend is %+0.2f.",
-                slowest.name or "Unknown",
-                slowest.realm or "Unknown",
-                slowest.trend.deltaTimedLevel or 0
-            ))
-        end
-    end
-
     local overallTrend = ComputeImprovementFromRuns(runs)
+
+    local recommendations = MPT.InsightsAdvisor:Build({
+        runs = runs,
+        seasonDungeons = seasonDungeons,
+        isFailed = RunIsFailed,
+        getTimeLimit = function(run)
+            return GetDungeonTimeLimitSeconds(run.dungeonID or run.dungeonId)
+        end,
+        getDuration = function(run)
+            return NormalizeRunDurationSeconds(run.duration)
+        end,
+        getOwnerStats = GetOwnerStats,
+        characterKey = function(run)
+            local key, name = GetCharacterKey(run)
+            return key, name
+        end,
+        underperformingMetrics = underperformingMetrics,
+        synergyPairs = synergyPairs,
+        overallTrend = overallTrend,
+    })
 
     -- Create a sorted list of all characters
     local allCharacters = {}
@@ -1797,738 +1781,468 @@ function HistoryViewer:RefreshSeasonDropdown(catalog)
     UIDropDownMenu_SetText(dropdown, selectedLabel or "No Seasons")
 end
 
-function HistoryViewer:Create()
-    if self.frame then
-        self.frame:Show()
-        return self.frame
-    end
-    
-    -- Main frame
-    local frame = CreateFrame("Frame", "StormsDungeonDataHistory", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(1000, 700)
-    frame:SetPoint("CENTER", UIParent, "CENTER")
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    frame:SetFrameStrata("DIALOG")
-    frame:SetFrameLevel(100)
-    frame:SetScale(MPT.UIUtils:ComputeWindowScale())
-    -- Allow Escape key to close this window from any page/tab state.
-    if UISpecialFrames and frame.GetName then
-        local frameName = frame:GetName()
-        local alreadyRegistered = false
-        for _, name in ipairs(UISpecialFrames) do
-            if name == frameName then
-                alreadyRegistered = true
-                break
-            end
-        end
-        if not alreadyRegistered then
-            table.insert(UISpecialFrames, frameName)
+-- ---------------------------------------------------------------------------
+-- Window layout ("Party Cards" look)
+-- Left: nav + season stats, personal bests and averages (Runs page).
+-- Right: page header with season chip, filter chips, then the page body.
+-- ---------------------------------------------------------------------------
+
+local HV_WIDTH, HV_HEIGHT = 1150, 720
+local SIDE_WIDTH = 220
+local CONTENT_LEFT = SIDE_WIDTH + 16
+local CHIP_W, CHIP_GAP, CHIP_ROW_H = 214, 8, 34
+local TILE_COLUMNS, TILE_GAP, TILE_H = 4, 10, 136
+
+HistoryViewer.TILE_COLUMNS = TILE_COLUMNS
+HistoryViewer.TILE_GAP = TILE_GAP
+HistoryViewer.TILE_H = TILE_H
+
+-- Makes a dropdown open directly under itself and above the history window.
+local function AnchorDropdownToggle(frame, dropdown, button)
+    if not button or not ToggleDropDownMenu then return end
+    local function Reposition()
+        local list = _G["DropDownList1"]
+        if list and list:IsShown() then
+            list:SetFrameStrata("TOOLTIP")
+            list:SetFrameLevel(frame:GetFrameLevel() + 100)
+            list:ClearAllPoints()
+            list:SetPoint("TOPLEFT", dropdown.SDDChip or dropdown, "BOTTOMLEFT", 0, -2)
         end
     end
-    
-    frame.TitleBg:SetHeight(30)
-    frame.InsetBg:SetAlpha(0.35)
-    
-    -- Title
-    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", frame.TitleBg, "TOPLEFT", 10, -5)
-    title:SetText("Run History")
-    frame.Title = title
-    
-    local historyTab = MPT.UIUtils:CreateButton(frame, "History", 90, 22, function()
-        self:SetActivePage("history")
-    end)
-    historyTab:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -200, -32)
-    frame.HistoryTab = historyTab
-
-    local insightsTab = MPT.UIUtils:CreateButton(frame, "Insights", 90, 22, function()
-        self:SetActivePage("insights")
-    end)
-    insightsTab:SetPoint("LEFT", historyTab, "RIGHT", 6, 0)
-    frame.InsightsTab = insightsTab
-
-    local tierListTab = MPT.UIUtils:CreateButton(frame, "Tier List", 90, 22, function()
-        self:SetActivePage("tierlist")
-    end)
-    tierListTab:SetPoint("LEFT", insightsTab, "RIGHT", 6, 0)
-    frame.TierListTab = tierListTab
-
-    -- Shared backdrop
-    local backdropInfo = {
-        bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-        tile = true, tileSize = 16, edgeSize = 16,
-        insets = {left = 2, right = 2, top = 2, bottom = 2}
-    }
-
-    -- Season filter row (top of history page)
-    local seasonPanel = CreateFrame("Frame", nil, frame)
-    seasonPanel:SetSize(980, 36)
-    seasonPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, -70)
-    SetBackdropCompat(seasonPanel, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
-
-    local seasonLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    seasonLabel:SetPoint("LEFT", seasonPanel, "LEFT", 12, 0)
-    seasonLabel:SetText("Season:")
-    seasonLabel:SetTextColor(1, 0.84, 0, 1)
-
-    local seasonDropdown = CreateFrame("Frame", "StormsDungeonDataHistorySeasonDropdown", seasonPanel, "UIDropDownMenuTemplate")
-    seasonDropdown:SetPoint("LEFT", seasonLabel, "RIGHT", -2, -3)
-    UIDropDownMenu_SetWidth(seasonDropdown, 220)
-    UIDropDownMenu_JustifyText(seasonDropdown, "LEFT")
-    UIDropDownMenu_SetText(seasonDropdown, "Select Season")
-    do
-        local seasonButton = _G["StormsDungeonDataHistorySeasonDropdownButton"]
-        local seasonText = _G["StormsDungeonDataHistorySeasonDropdownText"]
-        if seasonButton then
-            seasonButton:ClearAllPoints()
-            seasonButton:SetPoint("RIGHT", seasonDropdown, "RIGHT", -16, 2)
+    button:SetScript("OnMouseDown", function()
+        ToggleDropDownMenu(1, nil, dropdown, dropdown, 8, 0)
+        if C_Timer and C_Timer.After then
+            C_Timer.After(0, Reposition)
+        else
+            Reposition()
         end
-        if seasonText and seasonButton then
-            seasonText:ClearAllPoints()
-            seasonText:SetPoint("LEFT", seasonDropdown, "LEFT", 24, 2)
-            seasonText:SetPoint("RIGHT", seasonButton, "LEFT", -2, 2)
+    end)
+    button:SetScript("OnClick", nil)
+end
+
+local function CreateChipDropdown(frame, parent, globalName, labelText, chipWidth)
+    local dropdown = CreateFrame("Frame", globalName, parent, "UIDropDownMenuTemplate")
+    UIDropDownMenu_SetWidth(dropdown, chipWidth - 20)
+    UIDropDownMenu_JustifyText(dropdown, "LEFT")
+    UIDropDownMenu_SetText(dropdown, "All")
+    MPT.Theme:StyleDropdownChip(dropdown, labelText)
+    AnchorDropdownToggle(frame, dropdown, _G[globalName .. "Button"])
+    dropdown.FilterLabel = dropdown.SDDChipLabel
+    return dropdown
+end
+
+local function PlaceChip(dropdown, parent, col, row)
+    dropdown:ClearAllPoints()
+    -- The template pads 16px left of its art; the chip starts at the padding edge.
+    dropdown:SetPoint("TOPLEFT", parent, "TOPLEFT", (col - 1) * (CHIP_W + CHIP_GAP) - 16, -(row - 1) * CHIP_ROW_H + 2)
+end
+
+-- Key/value row in the side panel. Returns the value FontString.
+local function AddSideRow(container, labelText, y)
+    local Theme = MPT.Theme
+    local label = Theme:Text(container, 12, "body", "muted")
+    label:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -y)
+    label:SetText(labelText)
+    local value = Theme:Text(container, 12, "body", "text", "RIGHT")
+    value:SetPoint("TOPRIGHT", container, "TOPRIGHT", 0, -y)
+    value:SetWidth(110)
+    value:SetText("--")
+    return value, label
+end
+
+local function AddSideHeader(container, text, y)
+    local header = MPT.Theme:Text(container, 10, "head", "muted")
+    header:SetPoint("TOPLEFT", container, "TOPLEFT", 0, -y)
+    header:SetText(string.upper(text))
+    return header
+end
+
+local function MakeBestValueClickable(self, valueText)
+    valueText:EnableMouse(true)
+    valueText:SetScript("OnMouseUp", function(_, button)
+        if button == "LeftButton" and valueText._sddLinkedRun then
+            OpenRunScoreboardFromHistory(self, valueText._sddLinkedRun)
         end
-        if seasonButton and ToggleDropDownMenu then
-            local function RepositionSeasonDropdownList()
-                local list = _G["DropDownList1"]
-                if list and list:IsShown() then
-                    list:SetFrameStrata("TOOLTIP")
-                    list:SetFrameLevel(frame:GetFrameLevel() + 100)
-                    list:ClearAllPoints()
-                    list:SetPoint("TOPLEFT", seasonDropdown, "BOTTOMLEFT", 8, -2)
-                end
-            end
-            seasonButton:SetScript("OnMouseDown", function()
-                ToggleDropDownMenu(1, nil, seasonDropdown, seasonDropdown, 8, 0)
-                if C_Timer and C_Timer.After then
-                    C_Timer.After(0, RepositionSeasonDropdownList)
-                else
-                    RepositionSeasonDropdownList()
-                end
-            end)
-            seasonButton:SetScript("OnClick", nil)
-        end
-    end
-    frame.SeasonDropdown = seasonDropdown
+    end)
+    valueText:SetScript("OnEnter", function()
+        local run = valueText._sddLinkedRun
+        if not run then return end
+        valueText:SetTextColor(MPT.Theme:Unpack("gold"))
+        GameTooltip:SetOwner(valueText, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Click to open scoreboard", 1, 0.75, 0.28)
+        GameTooltip:AddLine((run.dungeonName or "Unknown") .. " +" .. tostring(run.keystoneLevel or run.dungeonLevel or 0), 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    valueText:SetScript("OnLeave", function()
+        valueText:SetTextColor(MPT.Theme:Unpack("text"))
+        GameTooltip:Hide()
+    end)
+end
 
-    frame.SeasonPanel = seasonPanel
+function HistoryViewer:BuildSideStats(frame, side)
+    local stats = CreateFrame("Frame", nil, side)
+    stats:SetPoint("TOPLEFT", side, "TOPLEFT", 16, -186)
+    stats:SetPoint("BOTTOMRIGHT", side, "BOTTOMRIGHT", -16, 16)
+    frame.SideStats = stats
 
-    -- Summary bar
-    local summaryPanel = CreateFrame("Frame", nil, frame)
-    summaryPanel:SetSize(980, 52)
-    summaryPanel:SetPoint("TOPLEFT", seasonPanel, "BOTTOMLEFT", 0, -8)
-    SetBackdropCompat(summaryPanel, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
-    frame.SummaryPanel = summaryPanel
-
-    local summaryLabels = {"Total Runs", "Completed", "Failed", "Avg Level"}
+    local y = 0
+    frame.StatsTitle = AddSideHeader(stats, "Overall statistics", y)
+    y = y + 20
     frame.SummaryValues = {}
     frame.SummaryLabels = {}
-    for i, label in ipairs(summaryLabels) do
-        local colWidth = 980 / #summaryLabels
-        local x = 10 + ((i - 1) * colWidth)
+    frame.StatValues = {}
+    frame.StatLabels = {}
+    local summary = {"Runs", "Timed", "Depleted", "Avg key"}
+    for i, labelText in ipairs(summary) do
+        local value, label = AddSideRow(stats, labelText, y)
+        frame.SummaryValues[i] = value
+        frame.SummaryLabels[i] = label
+        y = y + 18
+    end
+    local function Stat(key, labelText, clickable)
+        local value, label = AddSideRow(stats, labelText, y)
+        frame.StatValues[key] = value
+        table.insert(frame.StatLabels, label)
+        if clickable then MakeBestValueClickable(self, value) end
+        y = y + 18
+    end
+    Stat("mvpPercent", "MVP rate")
+    Stat("avgDuration", "Avg time")
 
-        local labelText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        labelText:SetText(label .. ":")
-        labelText:SetPoint("TOPLEFT", summaryPanel, "TOPLEFT", x, -10)
-        labelText:SetTextColor(1, 0.84, 0, 1)
+    y = y + 10
+    AddSideHeader(stats, "Personal bests", y)
+    y = y + 20
+    Stat("bestKeystoneLevel", "Highest key", true)
+    Stat("bestDPS", "DPS", true)
+    Stat("bestDamage", "Damage", true)
+    Stat("bestHPS", "HPS", true)
+    Stat("bestHealing", "Healing", true)
+    Stat("bestInterrupts", "Interrupts", true)
+    Stat("bestDispels", "Dispels", true)
 
-        local valueText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        valueText:SetText("--")
-        valueText:SetPoint("TOPLEFT", summaryPanel, "TOPLEFT", x, -26)
-        valueText:SetTextColor(1, 1, 1, 1)
+    y = y + 10
+    AddSideHeader(stats, "Averages", y)
+    y = y + 20
+    Stat("avgDPS", "DPS")
+    Stat("avgDamage", "Damage")
+    Stat("avgHPS", "HPS")
+    Stat("avgHealing", "Healing")
+    Stat("avgInterrupts", "Interrupts")
+    Stat("avgDispels", "Dispels")
+    Stat("avgDeaths", "Deaths")
+    Stat("avgAvoidableDamage", "Avoidable dmg")
+end
 
-        table.insert(frame.SummaryLabels, labelText)
-        table.insert(frame.SummaryValues, valueText)
+function HistoryViewer:BuildSettingsPage(frame, content)
+    local Theme = MPT.Theme
+    local panel = CreateFrame("Frame", nil, content)
+    panel:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -52)
+    panel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
+    panel:Hide()
+    frame.SettingsPanel = panel
+
+    local function Section(title, y)
+        local fs = Theme:Text(panel, 10, "head", "muted")
+        fs:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -y)
+        fs:SetText(string.upper(title))
+    end
+    local toggles = {}
+    local function Toggle(label, y, getter, setter, tip)
+        local t = Theme:Toggle(panel, label, getter, setter, tip)
+        t:SetWidth(420)
+        t:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -y)
+        table.insert(toggles, t)
+        return t
     end
 
-    -- Filter bar (2 rows, evenly spaced)
-    local filterPanel = CreateFrame("Frame", nil, frame)
-    filterPanel:SetSize(980, 100)
-    filterPanel:SetPoint("TOPLEFT", summaryPanel, "BOTTOMLEFT", 0, -12)
-    SetBackdropCompat(filterPanel, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
+    Section("After a key", 4)
+    Toggle("Show the scoreboard when a key ends", 26,
+        function() return Theme:GetSetting("autoShowScoreboard", true) ~= false end,
+        function(v) Theme:SetSetting("autoShowScoreboard", v) end)
+    frame.AutoReportCheck = Toggle("Auto-report MVP summary to party", 52,
+        function() return Theme:GetSetting("autoReportToParty", false) == true end,
+        function(v)
+            Theme:SetSetting("autoReportToParty", v)
+            local sb = MPT.Scoreboard and MPT.Scoreboard.frame
+            if sb and sb.AutoReportCheck then sb.AutoReportCheck:Refresh() end
+        end,
+        "When several group members run SDD, only one of you posts.")
+
+    Section("Tooltips", 96)
+    frame.PlayerTooltipCheck = Toggle("Show star ratings on player tooltips", 118,
+        function() return Theme:GetSetting("playerTooltipEnabled", false) == true end,
+        function(v) Theme:SetSetting("playerTooltipEnabled", v) end)
+
+    Section("Interface", 162)
+    Toggle("Animations (scoreboard cards, bars, counters)", 184,
+        function() return Theme:AnimationsEnabled() end,
+        function(v) Theme:SetSetting("uiAnimations", v) end)
+    Toggle("Show minimap button", 210,
+        function()
+            local s = Theme:GetSetting("libdbicon", nil)
+            return not (s and s.hide)
+        end,
+        function(v)
+            local s = Theme:GetSetting("libdbicon", nil) or {minimapPos = 225}
+            s.hide = not v
+            Theme:SetSetting("libdbicon", s)
+            local dbIcon = LibStub and LibStub("LibDBIcon-1.0", true)
+            if dbIcon and dbIcon:IsRegistered("StormsDungeonData") then
+                if v then dbIcon:Show("StormsDungeonData") else dbIcon:Hide("StormsDungeonData") end
+            else
+                local btn = _G["StormsDungeonDataMinimapButton"]
+                if btn then btn:SetShown(v) end
+            end
+        end)
+
+    local liveBtn = Theme:Button(panel, "Open live tracker", 150, 26, "default", function()
+        if MPT.LiveTrackerFrame and MPT.LiveTrackerFrame.Toggle then MPT.LiveTrackerFrame:Toggle() end
+    end)
+    liveBtn:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -256)
+
+    panel.Toggles = toggles
+    panel:SetScript("OnShow", function()
+        for _, t in ipairs(toggles) do t:Refresh() end
+    end)
+end
+
+function HistoryViewer:Create()
+    if self.frame then
+        return self.frame
+    end
+    local Theme = MPT.Theme
+
+    local frame = Theme:Window("StormsDungeonDataHistory", HV_WIDTH, HV_HEIGHT, "Runs", "DIALOG")
+    frame:SetFrameLevel(100)
+    frame:SetScale(MPT.UIUtils:ComputeWindowScale())
+    frame:Hide()
+
+    -- Side panel
+    local side = CreateFrame("Frame", nil, frame)
+    side:SetPoint("TOPLEFT", frame, "TOPLEFT", 1, -1)
+    side:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 1, 1)
+    side:SetWidth(SIDE_WIDTH)
+    local sideFill = side:CreateTexture(nil, "BACKGROUND", nil, -5)
+    sideFill:SetAllPoints(side)
+    sideFill:SetColorTexture(Theme:Unpack("surface", 0.6))
+    local sideLine = side:CreateTexture(nil, "BORDER")
+    sideLine:SetPoint("TOPRIGHT", side, "TOPRIGHT", 0, 0)
+    sideLine:SetPoint("BOTTOMRIGHT", side, "BOTTOMRIGHT", 0, 0)
+    sideLine:SetWidth(1)
+    sideLine:SetColorTexture(Theme:Unpack("line"))
+    frame.Side = side
+
+    local brand = Theme:Text(side, 14, "head", "text")
+    brand:SetPoint("TOPLEFT", side, "TOPLEFT", 16, -18)
+    brand:SetText("Storm's Dungeon Data")
+
+    local function NavButton(text, page, y)
+        local btn = Theme:Button(side, text, SIDE_WIDTH - 32, 28, "ghost", function() self:SetActivePage(page) end)
+        btn:SetPoint("TOPLEFT", side, "TOPLEFT", 16, -y)
+        btn.Label:SetJustifyH("LEFT")
+        btn.Label:SetPoint("LEFT", btn, "LEFT", 12, 0)
+        return btn
+    end
+    frame.HistoryTab = NavButton("Runs", "history", 46)
+    frame.InsightsTab = NavButton("Insights", "insights", 78)
+    frame.TierListTab = NavButton("Tier list", "tierlist", 110)
+    frame.SettingsTab = NavButton("Settings", "settings", 142)
+
+    self:BuildSideStats(frame, side)
+
+    -- Content column
+    local content = CreateFrame("Frame", nil, frame)
+    content:SetPoint("TOPLEFT", frame, "TOPLEFT", CONTENT_LEFT, -14)
+    content:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -16, 16)
+    frame.Content = content
+
+    frame.Title:ClearAllPoints()
+    frame.Title:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -4)
+    Theme:SetFont(frame.Title, 20, "head")
+    frame.CloseButton:ClearAllPoints()
+    frame.CloseButton:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -10, -10)
+
+    -- Season chip in the header
+    local seasonHolder = CreateFrame("Frame", nil, content)
+    seasonHolder:SetSize(280, 30)
+    seasonHolder:SetPoint("TOPRIGHT", content, "TOPRIGHT", -30, 0)
+    frame.SeasonPanel = seasonHolder
+    frame.SeasonDropdown = CreateChipDropdown(frame, seasonHolder, "StormsDungeonDataHistorySeasonDropdown", "Season", 280)
+    frame.SeasonDropdown:SetPoint("TOPLEFT", seasonHolder, "TOPLEFT", -16, 2)
+    UIDropDownMenu_SetText(frame.SeasonDropdown, "Select season")
+
+    -- Filter chips
+    local filterPanel = CreateFrame("Frame", nil, content)
+    filterPanel:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -46)
+    filterPanel:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -46)
+    filterPanel:SetHeight(CHIP_ROW_H * 2)
     frame.FilterPanel = filterPanel
-    
-    local function CreateFilterDropdown(labelText, x, width, yOffset)
-        yOffset = yOffset or 0
-        local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        label:SetText(labelText)
-        label:SetPoint("TOPLEFT", filterPanel, "TOPLEFT", x + 8, -8 + yOffset)
-        label:SetTextColor(1, 0.84, 0, 1)
 
-        -- UIDropDownMenuTemplate relies on the dropdown having a name for correct anchoring
-        -- (the template creates named children like <name>Button and uses them as anchor frames).
-        local safeKey = (labelText or ""):gsub("%W", "")
-        if safeKey == "" then safeKey = "Filter" end
-        local dropdownName = "StormsDungeonDataHistory" .. safeKey .. "Dropdown"
-        local dropdown = CreateFrame("Frame", dropdownName, filterPanel, "UIDropDownMenuTemplate")
-        dropdown:SetPoint("TOPLEFT", filterPanel, "TOPLEFT", x - 12, -22 + yOffset)
-        UIDropDownMenu_SetWidth(dropdown, width)
-        UIDropDownMenu_JustifyText(dropdown, "LEFT")
-        UIDropDownMenu_SetText(dropdown, "All")
+    frame.DungeonDropdown = CreateChipDropdown(frame, filterPanel, "StormsDungeonDataHistoryDungeonDropdown", "Dungeon", CHIP_W)
+    frame.KeystoneDropdown = CreateChipDropdown(frame, filterPanel, "StormsDungeonDataHistoryKeystoneDropdown", "Key", CHIP_W)
+    frame.ResultDropdown = CreateChipDropdown(frame, filterPanel, "StormsDungeonDataHistoryResultDropdown", "Result", CHIP_W)
+    frame.CharacterDropdown = CreateChipDropdown(frame, filterPanel, "StormsDungeonDataHistoryCharacterDropdown", "Character", CHIP_W)
+    frame.RoleDropdown = CreateChipDropdown(frame, filterPanel, "StormsDungeonDataHistoryRoleDropdown", "Role", CHIP_W)
+    frame.ClassSpecHeroDropdown = CreateChipDropdown(frame, filterPanel, "StormsDungeonDataHistoryClassSpecDropdown", "Spec", CHIP_W)
 
-        -- Make the selected value text larger for readability.
-        local dropdownText = _G[dropdownName .. "Text"]
-        if dropdownText and dropdownText.SetFontObject then
-            dropdownText:SetFontObject("GameFontNormalLarge")
-        end
-
-        -- Force the menu to open directly below the dropdown button.
-        -- UIDropDownMenuTemplate typically toggles from the button's OnMouseDown; if we only
-        -- override OnClick, the default mouse-down toggle can open (default anchor) and then
-        -- our OnClick toggles again, immediately closing it.
-        local button = _G[dropdownName .. "Button"]
-        if button then
-            -- Move dropdown arrow button back to the right side.
-            button:ClearAllPoints()
-            button:SetPoint("RIGHT", dropdown, "RIGHT", -16, 2)
-            if dropdownText then
-                dropdownText:ClearAllPoints()
-                dropdownText:SetPoint("LEFT", dropdown, "LEFT", 24, 2)
-                dropdownText:SetPoint("RIGHT", button, "LEFT", -2, 2)
-            end
-
-            if UIDropDownMenu_SetAnchor then
-                UIDropDownMenu_SetAnchor(dropdown, 8, 0, "TOPLEFT", dropdown, "BOTTOMLEFT")
-            end
-
-            if ToggleDropDownMenu then
-                local function RepositionDropdownList()
-                    local list = _G["DropDownList1"]
-                    if list and list:IsShown() then
-                        -- Ensure dropdown list draws on top of the history window (same strata, higher level)
-                        list:SetFrameStrata("TOOLTIP")
-                        list:SetFrameLevel(frame:GetFrameLevel() + 100)
-                        list:ClearAllPoints()
-                        list:SetPoint("TOPLEFT", dropdown, "BOTTOMLEFT", 8, -2)
-                    end
-                end
-
-                button:SetScript("OnMouseDown", function()
-                    ToggleDropDownMenu(1, nil, dropdown, dropdown, 8, 0)
-                    if C_Timer and C_Timer.After then
-                        C_Timer.After(0, RepositionDropdownList)
-                    else
-                        RepositionDropdownList()
-                    end
-                end)
-                button:SetScript("OnClick", nil)
-            end
-        end
-        dropdown.FilterLabel = label
-        return dropdown
-    end
-
-    local columns = 3
-    local colWidth = math.floor(980 / columns)
-    local dropdownWidth = colWidth - 30
-    local colSpacing = colWidth - dropdownWidth  -- Spacing between columns (30px)
-    local row1Y = 0
-    local row2Y = -46
-
-    local function ColX(col)
-        return 10 + ((col - 1) * colWidth)
-    end
-
-    -- Row 1
-    frame.DungeonDropdown = CreateFilterDropdown("Dungeon", ColX(1), dropdownWidth, row1Y)
-    frame.KeystoneDropdown = CreateFilterDropdown("Keystone", ColX(2), dropdownWidth, row1Y)
-    frame.ResultDropdown = CreateFilterDropdown("Result", ColX(3), dropdownWidth, row1Y)
-
-    -- Row 2
-    frame.CharacterDropdown = CreateFilterDropdown("Character", ColX(1), dropdownWidth, row2Y)
-    frame.RoleDropdown = CreateFilterDropdown("Role", ColX(2), dropdownWidth, row2Y)
-    frame.ClassSpecHeroDropdown = CreateFilterDropdown("Class/Spec", ColX(3), dropdownWidth, row2Y)
-
-    local resetButton = MPT.UIUtils:CreateButton(filterPanel, "Reset Filters", 120, 22, function()
+    local resetButton = Theme:Button(filterPanel, "Reset filters", 110, 26, "ghost", function()
         self:ResetNonSeasonFilters()
         self:PopulateFilters()
     end)
-    resetButton:SetPoint("TOPLEFT", frame.ClassSpecHeroDropdown, "BOTTOMLEFT", 16, -6)
     frame.ResetFiltersButton = resetButton
 
-    -- Insights score panel (shown only on Insights page, right side).
-    -- Tall layout: starts below tabs and ends above the main insights content panel.
-    local insightsScorePanel = CreateFrame("Frame", nil, frame)
-    insightsScorePanel:SetSize(620, 180)
-    insightsScorePanel:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -16, -58)
-    SetBackdropCompat(insightsScorePanel, backdropInfo, {0.04, 0.04, 0.06, 0.65}, {1, 1, 1, 0.25})
+    -- Runs page: tile grid
+    local statsPanel = CreateFrame("Frame", nil, content)
+    statsPanel:SetPoint("TOPLEFT", filterPanel, "BOTTOMLEFT", 0, -8)
+    statsPanel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
+    frame.StatsPanel = statsPanel
+
+    frame.RunScroll, frame.RunContent = MPT.UIUtils:CreateScrollFrame(statsPanel, 880, 500)
+    frame.RunScroll:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 0, 0)
+    frame.RunScroll:SetPoint("BOTTOMRIGHT", statsPanel, "BOTTOMRIGHT", -24, 0)
+    frame.RunContent:SetWidth(HV_WIDTH - CONTENT_LEFT - 16 - 26)
+    frame.RunRows = {}
+    frame.RunTilePool = {}
+
+    frame.RunsEmpty = Theme:Text(statsPanel, 13, "body", "muted", "CENTER")
+    frame.RunsEmpty:SetPoint("TOP", statsPanel, "TOP", 0, -60)
+    frame.RunsEmpty:SetText("No runs match these filters. Finish a key or reset the filters.")
+    frame.RunsEmpty:Hide()
+
+    -- Insights page: score-gained panel on top, report cards below
+    local insightsScorePanel = CreateFrame("Frame", nil, content)
+    insightsScorePanel:SetPoint("TOPLEFT", filterPanel, "BOTTOMLEFT", 0, -8)
+    insightsScorePanel:SetPoint("TOPRIGHT", filterPanel, "BOTTOMRIGHT", -24, -8)
+    insightsScorePanel:SetHeight(130)
+    Theme:Panel(insightsScorePanel, "surface", "line")
     insightsScorePanel:Hide()
     frame.InsightsScorePanel = insightsScorePanel
 
-    local insightsScoreTitle = insightsScorePanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    insightsScoreTitle:SetPoint("TOPLEFT", insightsScorePanel, "TOPLEFT", 8, -6)
-    insightsScoreTitle:SetText("Character Score Gained (Last 7 Days)")
-    insightsScoreTitle:SetTextColor(1, 0.84, 0, 1)
+    local insightsScoreTitle = Theme:Text(insightsScorePanel, 10, "head", "muted")
+    insightsScoreTitle:SetPoint("TOPLEFT", insightsScorePanel, "TOPLEFT", 12, -10)
+    insightsScoreTitle:SetText("RATING GAINED, LAST 7 DAYS")
     frame.InsightsScoreTitle = insightsScoreTitle
 
     frame.InsightsScoreRows = {}
     frame.InsightsScoreScroll, frame.InsightsScoreContent = MPT.UIUtils:CreateScrollFrame(insightsScorePanel, 600, 60)
-    frame.InsightsScoreScroll:SetPoint("TOPLEFT", insightsScorePanel, "TOPLEFT", 8, -20)
-    frame.InsightsScoreScroll:SetPoint("BOTTOMRIGHT", insightsScorePanel, "BOTTOMRIGHT", -16, 8)
-    if frame.InsightsScoreContent and frame.InsightsScoreContent.SetBackdrop then
-        frame.InsightsScoreContent:SetBackdrop(nil)
-    end
+    frame.InsightsScoreScroll:SetPoint("TOPLEFT", insightsScorePanel, "TOPLEFT", 12, -28)
+    frame.InsightsScoreScroll:SetPoint("BOTTOMRIGHT", insightsScorePanel, "BOTTOMRIGHT", -28, 8)
 
-    local insightsScoreEmpty = insightsScorePanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    insightsScoreEmpty:SetPoint("TOPLEFT", insightsScorePanel, "TOPLEFT", 8, -38)
-    insightsScoreEmpty:SetText("No character gained score in the last 7 days.")
+    local insightsScoreEmpty = Theme:Text(insightsScorePanel, 12, "body", "muted")
+    insightsScoreEmpty:SetPoint("TOPLEFT", insightsScorePanel, "TOPLEFT", 12, -34)
+    insightsScoreEmpty:SetText("No character gained rating in the last 7 days.")
     insightsScoreEmpty:Hide()
     frame.InsightsScoreEmpty = insightsScoreEmpty
-    
-    -- Main stats panel with proper spacing
-    local statsPanel = CreateFrame("Frame", nil, frame)
-    statsPanel:SetPoint("TOPLEFT", filterPanel, "BOTTOMLEFT", 0, -8)
-    statsPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -10, 10)
-    SetBackdropCompat(statsPanel, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
-    frame.StatsPanel = statsPanel
-    
-    -- Stats content
-    local statsTitle = statsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    statsTitle:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 10, -10)
-    statsTitle:SetText("Dungeon Statistics")
-    frame.StatsTitle = statsTitle
-    
-    -- Averages & best stats grid: 4 columns, 4 rows (row 1 has 3 filled columns)
-    local metricDefs = {
-        -- Row 1: Best Level, Avg Duration, MVP % (col 4 intentionally empty)
-        {key = "bestKeystoneLevel", label = "Best Level", clickable = true},
-        {key = "avgDuration", label = "Avg Duration"},
-        {key = "mvpPercent", label = "MVP %"},
-        {key = "_spacer1", spacer = true},
-        -- Row 2: Best Damage, Best DPS, Best Healing, Best HPS
-        {key = "bestDamage", label = "Best Damage", clickable = true},
-        {key = "bestDPS", label = "Best DPS", clickable = true},
-        {key = "bestHealing", label = "Best Healing", clickable = true},
-        {key = "bestHPS", label = "Best HPS", clickable = true},
-        -- Row 3: Avg Damage, Avg DPS, Avg Healing, Avg HPS
-        {key = "avgDamage", label = "Avg Damage"},
-        {key = "avgDPS", label = "Avg DPS"},
-        {key = "avgHealing", label = "Avg Healing"},
-        {key = "avgHPS", label = "Avg HPS"},
-        -- Row 4: Avg Avoid Dmg, Avg Deaths, Best Interrupts, Avg Interrupts
-        {key = "avgAvoidableDamage", label = "Avg Avoid Dmg"},
-        {key = "avgDeaths", label = "Avg Deaths"},
-        {key = "bestInterrupts", label = "Best Interrupts", clickable = true},
-        {key = "avgInterrupts", label = "Avg Interrupts"},
-        -- Row 5: Best Dispels, Avg Dispels
-        {key = "bestDispels", label = "Best Dispels", clickable = true},
-        {key = "avgDispels", label = "Avg Dispels"},
-        {key = "_spacer2", spacer = true},
-        {key = "_spacer3", spacer = true},
-    }
 
-    frame.StatValues = {}
-    frame.StatLabels = {}
-    local gridTopY = -40
-    local columns = 4
-    local colSpacing = 240
-    local rowHeight = 30
-    local labelWidth = 100
-
-    for i, metric in ipairs(metricDefs) do
-        if not metric.spacer then
-        local colIndex = (i - 1) % columns
-        local rowIndex = math.floor((i - 1) / columns)
-        local x = 10 + (colIndex * colSpacing)
-        local y = gridTopY - (rowIndex * rowHeight)
-
-        local labelText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        labelText:SetText(metric.label .. ":")
-        labelText:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", x, y)
-        labelText:SetTextColor(1, 0.84, 0, 1)
-
-        local valueText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        valueText:SetText("--")
-        valueText:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", x + labelWidth, y)
-
-        if metric.clickable then
-            valueText:EnableMouse(true)
-            valueText:SetScript("OnMouseUp", function(_, button)
-                if button == "LeftButton" and valueText._sddLinkedRun then
-                    OpenRunScoreboardFromHistory(self, valueText._sddLinkedRun)
-                end
-            end)
-            valueText:SetScript("OnEnter", function()
-                if not valueText._sddLinkedRun then
-                    return
-                end
-                if GameTooltip then
-                    local run = valueText._sddLinkedRun
-                    local level = run.keystoneLevel or run.dungeonLevel or 0
-                    GameTooltip:SetOwner(valueText, "ANCHOR_TOP")
-                    GameTooltip:SetText("Click to open scoreboard", 1, 0.84, 0)
-                    GameTooltip:AddLine((run.dungeonName or "Unknown") .. " +" .. tostring(level), 1, 1, 1)
-                    GameTooltip:Show()
-                end
-            end)
-            valueText:SetScript("OnLeave", function()
-                if GameTooltip then
-                    GameTooltip:Hide()
-                end
-            end)
-        end
-
-        frame.StatValues[metric.key] = valueText
-        table.insert(frame.StatLabels, labelText)
-        end -- not spacer
-    end
-    
-    -- Run history header
-    local rows = math.ceil(#metricDefs / columns)
-    local historyHeaderY = gridTopY - (rows * rowHeight) - 10
-
-    local statsSectionFrame = CreateFrame("Frame", nil, statsPanel)
-    statsSectionFrame:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 6, -38)
-    statsSectionFrame:SetPoint("TOPRIGHT", statsPanel, "TOPRIGHT", -6, -38)
-    statsSectionFrame:SetPoint("BOTTOMLEFT", statsPanel, "TOPLEFT", 6, historyHeaderY + 6)
-    statsSectionFrame:SetPoint("BOTTOMRIGHT", statsPanel, "TOPRIGHT", -6, historyHeaderY + 6)
-    SetBackdropCompat(statsSectionFrame, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
-
-    local historyLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    historyLabel:SetText("Recent Runs:")
-    historyLabel:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 10, historyHeaderY)
-    historyLabel:SetTextColor(1, 0.84, 0, 1)
-    frame.HistoryLabel = historyLabel
-
-    -- Auto-report to party toggle (mirrors the same setting on the scoreboard)
-    local autoReportCheck = CreateFrame("CheckButton", "StormsDungeonDataHistoryAutoReportCheck", statsPanel, "UICheckButtonTemplate")
-    autoReportCheck:SetSize(24, 24)
-    autoReportCheck:SetPoint("LEFT", historyLabel, "RIGHT", 16, 0)
-    autoReportCheck.text:ClearAllPoints()
-    autoReportCheck.text:SetPoint("LEFT", autoReportCheck, "RIGHT", 2, 0)
-    autoReportCheck.text:SetJustifyH("LEFT")
-    autoReportCheck.text:SetText("Auto-report to party")
-    autoReportCheck.text:SetTextColor(0.9, 0.9, 0.9, 1)
-
-    local function GetAutoReportSettingForHistory()
-        if StormsDungeonDataDB and StormsDungeonDataDB.settings then
-            return StormsDungeonDataDB.settings.autoReportToParty == true
-        end
-        return false
-    end
-
-    autoReportCheck:SetChecked(GetAutoReportSettingForHistory())
-    autoReportCheck:SetScript("OnClick", function(self)
-        local checked = self:GetChecked()
-        if StormsDungeonDataDB then
-            StormsDungeonDataDB.settings = StormsDungeonDataDB.settings or {}
-            StormsDungeonDataDB.settings.autoReportToParty = checked
-        end
-        local sbCheck = _G["StormsDungeonDataAutoReportCheck"]
-        if sbCheck and sbCheck.SetChecked then
-            sbCheck:SetChecked(checked)
-        end
-    end)
-    frame.AutoReportCheck = autoReportCheck
-
-    -- Player tooltip toggle
-    local tooltipCheck = CreateFrame("CheckButton", "StormsDungeonDataHistoryPlayerTooltipCheck", statsPanel, "UICheckButtonTemplate")
-    tooltipCheck:SetSize(24, 24)
-    tooltipCheck:SetPoint("LEFT", autoReportCheck.text, "RIGHT", 20, 0)
-    tooltipCheck.text:ClearAllPoints()
-    tooltipCheck.text:SetPoint("LEFT", tooltipCheck, "RIGHT", 2, 0)
-    tooltipCheck.text:SetJustifyH("LEFT")
-    tooltipCheck.text:SetText("Player tooltip ratings")
-    tooltipCheck.text:SetTextColor(0.9, 0.9, 0.9, 1)
-
-    local function GetPlayerTooltipSettingForHistory()
-        if StormsDungeonDataDB and StormsDungeonDataDB.settings then
-            local v = StormsDungeonDataDB.settings.playerTooltipEnabled
-            if v ~= nil then
-                return v == true
-            end
-        end
-        return false
-    end
-
-    tooltipCheck:SetChecked(GetPlayerTooltipSettingForHistory())
-    tooltipCheck:SetScript("OnClick", function(self)
-        local checked = self:GetChecked()
-        if StormsDungeonDataDB then
-            StormsDungeonDataDB.settings = StormsDungeonDataDB.settings or {}
-            StormsDungeonDataDB.settings.playerTooltipEnabled = checked
-        end
-    end)
-    frame.PlayerTooltipCheck = tooltipCheck
-
-    -- Recent runs column headers
-    local headerBg = statsPanel:CreateTexture(nil, "BACKGROUND")
-    headerBg:SetHeight(18)
-    headerBg:SetWidth(840)
-    headerBg:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 10, historyHeaderY - 20)
-    headerBg:SetColorTexture(0.12, 0.12, 0.18, 0.35)
-    frame.RunHeaderBg = headerBg
-    frame.RunColumnHeaders = {}
-
-    local function HeaderText(text, x, width, justify)
-        local fs = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        fs:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 10 + x, historyHeaderY - 18)
-        fs:SetWidth(width)
-        fs:SetJustifyH(justify or "LEFT")
-        fs:SetTextColor(1, 0.84, 0, 1)
-        fs:SetText(text)
-        table.insert(frame.RunColumnHeaders, fs)
-        return fs
-    end
-
-    local colX = 5
-    HeaderText("Dungeon", colX, 155, "LEFT"); colX = colX + 155
-    HeaderText("Key", colX, 35, "CENTER"); colX = colX + 35
-    HeaderText("Time", colX, 55, "CENTER"); colX = colX + 55
-    -- No Result column: failed runs shown by red Time text
-    HeaderText("Spec", colX, 50, "CENTER"); colX = colX + 50
-    HeaderText("Hero", colX, 75, "CENTER"); colX = colX + 90
-    HeaderText("Date", colX, 50, "CENTER"); colX = colX + 50
-    HeaderText("Damage", colX, 70, "RIGHT"); colX = colX + 70
-    HeaderText("DPS", colX, 50, "RIGHT"); colX = colX + 50
-    HeaderText("Healing", colX, 70, "RIGHT"); colX = colX + 70
-    HeaderText("HPS", colX, 50, "RIGHT"); colX = colX + 50
-    HeaderText("INT", colX, 50, "CENTER"); colX = colX + 50
-    HeaderText("DISP", colX, 40, "CENTER"); colX = colX + 40
-    HeaderText("Avoid Dmg", colX, 65, "CENTER"); colX = colX + 65
-    HeaderText("Deaths", colX, 50, "CENTER"); colX = colX + 50
-    HeaderText("MVP", colX, 40, "CENTER")
-    
-    -- Run history scroll (reduced width to fit scrollbar within bounds, anchored right)
-    frame.RunScroll, frame.RunContent = MPT.UIUtils:CreateScrollFrame(statsPanel, 860, 300)
-    frame.RunScroll:SetPoint("TOPLEFT", statsPanel, "TOPLEFT", 10, historyHeaderY - 40)
-    frame.RunScroll:SetPoint("BOTTOMRIGHT", statsPanel, "BOTTOMRIGHT", -28, 10)
-    if frame.RunContent.SetBackdrop then
-        frame.RunContent:SetBackdrop(nil)
-    end
-    frame.RunRows = {}
-
-    local insightsPanel = CreateFrame("Frame", nil, frame)
-    insightsPanel:SetPoint("TOPLEFT", filterPanel, "BOTTOMLEFT", 0, -8)
-    insightsPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -10, 10)
-    SetBackdropCompat(insightsPanel, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
+    local insightsPanel = CreateFrame("Frame", nil, content)
+    insightsPanel:SetPoint("TOPLEFT", insightsScorePanel, "BOTTOMLEFT", 0, -10)
+    insightsPanel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
     insightsPanel:Hide()
     frame.InsightsPanel = insightsPanel
+    frame.InsightsTitle = Theme:Text(insightsPanel, 1, "body", "muted")
+    frame.InsightsTitle:Hide()
 
-    -- Tier List panel
-    local tierListPanel = CreateFrame("Frame", nil, frame)
-    tierListPanel:SetPoint("TOPLEFT", seasonPanel, "BOTTOMLEFT", 0, -8)
-    tierListPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -10, 10)
-    SetBackdropCompat(tierListPanel, backdropInfo, {0.05, 0.05, 0.05, 0.5}, {1, 1, 1, 0.3})
+    frame.InsightsScroll, frame.InsightsContent = MPT.UIUtils:CreateScrollFrame(insightsPanel, 880, 420)
+    frame.InsightsScroll:SetPoint("TOPLEFT", insightsPanel, "TOPLEFT", 0, 0)
+    frame.InsightsScroll:SetPoint("BOTTOMRIGHT", insightsPanel, "BOTTOMRIGHT", -24, 0)
+    frame.InsightsContent:SetWidth(870)
+    frame.InsightsRows = {}
+
+    -- Tier list page
+    local tierListPanel = CreateFrame("Frame", nil, content)
+    tierListPanel:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -46)
+    tierListPanel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
     tierListPanel:Hide()
     frame.TierListPanel = tierListPanel
+    frame.TierListTitle = Theme:Text(tierListPanel, 1, "body", "muted")
+    frame.TierListTitle:Hide()
 
-    local tierListTitle = tierListPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    tierListTitle:SetPoint("TOPLEFT", tierListPanel, "TOPLEFT", 10, -10)
-    tierListTitle:SetText("Spec Tier List")
-    frame.TierListTitle = tierListTitle
-
-    local tierListNote = tierListPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    tierListNote:SetPoint("TOPLEFT", tierListTitle, "BOTTOMLEFT", 0, -6)
-    tierListNote:SetText("Ranked by specialization across all players in YOUR season runs. The higher the key, the more weight performances have on rankings. F tier: insufficient data.")
-    tierListNote:SetTextColor(0.65, 0.65, 0.65, 1)
-    tierListNote:SetWidth(960)
+    local tierListNote = Theme:Text(tierListPanel, 12, "body", "muted")
+    tierListNote:SetPoint("TOPLEFT", tierListPanel, "TOPLEFT", 0, 0)
+    tierListNote:SetWidth(860)
     tierListNote:SetWordWrap(true)
-    tierListNote:SetJustifyH("LEFT")
+    tierListNote:SetText("Specs ranked across every player in your runs this season. Higher keys weigh more. F tier means not enough data yet.")
     frame.TierListNote = tierListNote
 
-    frame.TierListScroll, frame.TierListContent = MPT.UIUtils:CreateScrollFrame(tierListPanel, 940, 500)
+    frame.TierListScroll, frame.TierListContent = MPT.UIUtils:CreateScrollFrame(tierListPanel, 880, 500)
     frame.TierListScroll:SetPoint("TOPLEFT", tierListNote, "BOTTOMLEFT", 0, -12)
-    frame.TierListScroll:SetPoint("BOTTOMRIGHT", tierListPanel, "BOTTOMRIGHT", -28, 10)
-    if frame.TierListContent.SetBackdrop then
-        frame.TierListContent:SetBackdrop(nil)
-    end
+    frame.TierListScroll:SetPoint("BOTTOMRIGHT", tierListPanel, "BOTTOMRIGHT", -24, 0)
     frame.TierListRows = {}
 
-    if frame.InsightsScorePanel then
-        frame.InsightsScorePanel:ClearAllPoints()
-        frame.InsightsScorePanel:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -16, -58)
-        frame.InsightsScorePanel:SetPoint("BOTTOMRIGHT", insightsPanel, "TOPRIGHT", -16, 6)
-    end
-
-    local insightsTitle = insightsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    insightsTitle:SetPoint("TOPLEFT", insightsPanel, "TOPLEFT", 10, -10)
-    insightsTitle:SetText("Season Insights")
-    frame.InsightsTitle = insightsTitle
-
-    frame.InsightsScroll, frame.InsightsContent = MPT.UIUtils:CreateScrollFrame(insightsPanel, 900, 420)
-    frame.InsightsScroll:SetPoint("TOPLEFT", insightsPanel, "TOPLEFT", 10, -36)
-    frame.InsightsScroll:SetPoint("BOTTOMRIGHT", insightsPanel, "BOTTOMRIGHT", -28, 10)
-    if frame.InsightsContent.SetBackdrop then
-        frame.InsightsContent:SetBackdrop(nil)
-    end
-    frame.InsightsRows = {}
+    self:BuildSettingsPage(frame, content)
 
     self.frame = frame
     self:SetActivePage(self.activePage or "history")
     return frame
 end
 
-function HistoryViewer:SetActivePage(page)
-    if page == "insights" then
-        self.activePage = "insights"
-    elseif page == "tierlist" then
-        self.activePage = "tierlist"
+local PAGE_TITLES = {
+    history = "Runs",
+    insights = "Insights",
+    tierlist = "Tier list",
+    settings = "Settings",
+}
+
+function HistoryViewer:LayoutFilterChips(page)
+    local f = self.frame
+    local all = {f.DungeonDropdown, f.KeystoneDropdown, f.ResultDropdown, f.CharacterDropdown, f.RoleDropdown, f.ClassSpecHeroDropdown}
+    for _, d in ipairs(all) do d:Hide() end
+    f.ResetFiltersButton:Hide()
+
+    if page == "history" then
+        f.FilterPanel:Show()
+        f.FilterPanel:SetHeight(CHIP_ROW_H * 2)
+        PlaceChip(f.DungeonDropdown, f.FilterPanel, 1, 1)
+        PlaceChip(f.KeystoneDropdown, f.FilterPanel, 2, 1)
+        PlaceChip(f.ResultDropdown, f.FilterPanel, 3, 1)
+        PlaceChip(f.CharacterDropdown, f.FilterPanel, 4, 1)
+        PlaceChip(f.RoleDropdown, f.FilterPanel, 1, 2)
+        PlaceChip(f.ClassSpecHeroDropdown, f.FilterPanel, 2, 2)
+        for _, d in ipairs(all) do d:Show() end
+        f.ResetFiltersButton:ClearAllPoints()
+        f.ResetFiltersButton:SetPoint("TOPLEFT", f.FilterPanel, "TOPLEFT", 2 * (CHIP_W + CHIP_GAP), -CHIP_ROW_H)
+        f.ResetFiltersButton:Show()
+    elseif page == "insights" then
+        f.FilterPanel:Show()
+        f.FilterPanel:SetHeight(CHIP_ROW_H)
+        PlaceChip(f.CharacterDropdown, f.FilterPanel, 1, 1)
+        f.CharacterDropdown:Show()
     else
-        self.activePage = "history"
+        f.FilterPanel:Hide()
     end
-    if not self.frame then
+end
+
+function HistoryViewer:SetActivePage(page)
+    if not PAGE_TITLES[page] then
+        page = "history"
+    end
+    self.activePage = page
+    local f = self.frame
+    if not f then
         return
     end
+    local Theme = MPT.Theme
 
-    local isHistory  = (self.activePage == "history")
-    local isInsights = (self.activePage == "insights")
-    local isTierList = (self.activePage == "tierlist")
+    f.Title:SetText(PAGE_TITLES[page])
+    Theme:SetButtonSelected(f.HistoryTab, page == "history")
+    Theme:SetButtonSelected(f.InsightsTab, page == "insights")
+    Theme:SetButtonSelected(f.TierListTab, page == "tierlist")
+    Theme:SetButtonSelected(f.SettingsTab, page == "settings")
 
-    -- Content panels
-    if self.frame.StatsPanel then
-        if isHistory then self.frame.StatsPanel:Show() else self.frame.StatsPanel:Hide() end
-    end
-    if self.frame.InsightsPanel then
-        if isInsights then self.frame.InsightsPanel:Show() else self.frame.InsightsPanel:Hide() end
-    end
-    if self.frame.TierListPanel then
-        if isTierList then self.frame.TierListPanel:Show() else self.frame.TierListPanel:Hide() end
-    end
-    if self.frame.SummaryPanel then
-        if isHistory then self.frame.SummaryPanel:Show() else self.frame.SummaryPanel:Hide() end
-    end
-    if self.frame.FilterPanel then
-        if isTierList then self.frame.FilterPanel:Hide() else self.frame.FilterPanel:Show() end
-    end
+    f.StatsPanel:SetShown(page == "history")
+    f.SideStats:SetShown(page == "history")
+    f.InsightsPanel:SetShown(page == "insights")
+    f.InsightsScorePanel:SetShown(page == "insights")
+    f.TierListPanel:SetShown(page == "tierlist")
+    f.SettingsPanel:SetShown(page == "settings")
+    f.SeasonPanel:SetShown(page ~= "settings")
+    self:LayoutFilterChips(page)
 
-    -- Tab enabled states (disable the tab for the current page)
-    if self.frame.HistoryTab and self.frame.HistoryTab.SetEnabled then
-        self.frame.HistoryTab:SetEnabled(not isHistory)
-    end
-    if self.frame.InsightsTab and self.frame.InsightsTab.SetEnabled then
-        self.frame.InsightsTab:SetEnabled(not isInsights)
-    end
-    if self.frame.TierListTab and self.frame.TierListTab.SetEnabled then
-        self.frame.TierListTab:SetEnabled(not isTierList)
-    end
-
-    -- Title
-    if self.frame.Title then
-        if isInsights then
-            self.frame.Title:SetText("Season Insights")
-        elseif isTierList then
-            self.frame.Title:SetText("Spec Tier List")
-        else
-            self.frame.Title:SetText("Run History")
-        end
-    end
-
-    -- History-only widgets
-    local showHistoryWidgets = isHistory
-    if self.frame.StatsTitle then
-        if showHistoryWidgets then self.frame.StatsTitle:Show() else self.frame.StatsTitle:Hide() end
-    end
-    if self.frame.HistoryLabel then
-        if showHistoryWidgets then self.frame.HistoryLabel:Show() else self.frame.HistoryLabel:Hide() end
-    end
-    if self.frame.RunHeaderBg then
-        if showHistoryWidgets then self.frame.RunHeaderBg:Show() else self.frame.RunHeaderBg:Hide() end
-    end
-    if self.frame.StatLabels then
-        for _, fs in ipairs(self.frame.StatLabels) do
-            if showHistoryWidgets then fs:Show() else fs:Hide() end
-        end
-    end
-    if self.frame.StatValues then
-        for _, fs in pairs(self.frame.StatValues) do
-            if showHistoryWidgets then fs:Show() else fs:Hide() end
-        end
-    end
-    if self.frame.RunColumnHeaders then
-        for _, fs in ipairs(self.frame.RunColumnHeaders) do
-            if showHistoryWidgets then fs:Show() else fs:Hide() end
-        end
-    end
-    if self.frame.SummaryLabels then
-        for _, fs in ipairs(self.frame.SummaryLabels) do
-            if showHistoryWidgets then fs:Show() else fs:Hide() end
-        end
-    end
-    if self.frame.SummaryValues then
-        for _, fs in ipairs(self.frame.SummaryValues) do
-            if showHistoryWidgets then fs:Show() else fs:Hide() end
-        end
-    end
-
-    -- Filter panel layout helper
-    local function SetDropdownVisible(dropdown, visible)
-        if not dropdown then return end
-        if visible then dropdown:Show() else dropdown:Hide() end
-        if dropdown.FilterLabel then
-            if visible then dropdown.FilterLabel:Show() else dropdown.FilterLabel:Hide() end
-        end
-    end
-
-    if isInsights then
-        if self.frame.FilterPanel and self.frame.SeasonPanel then
-            self.frame.FilterPanel:ClearAllPoints()
-            self.frame.FilterPanel:SetPoint("TOPLEFT", self.frame.SeasonPanel, "BOTTOMLEFT", 0, -4)
-        end
-        SetDropdownVisible(self.frame.DungeonDropdown, false)
-        SetDropdownVisible(self.frame.KeystoneDropdown, false)
-        SetDropdownVisible(self.frame.ResultDropdown, false)
-        SetDropdownVisible(self.frame.RoleDropdown, false)
-        SetDropdownVisible(self.frame.ClassSpecHeroDropdown, false)
-        SetDropdownVisible(self.frame.CharacterDropdown, true)
-        if self.frame.CharacterDropdown then
-            self.frame.CharacterDropdown:ClearAllPoints()
-            self.frame.CharacterDropdown:SetPoint("TOPLEFT", self.frame.FilterPanel, "TOPLEFT", -2, -22)
-        end
-        if self.frame.CharacterDropdown and self.frame.CharacterDropdown.FilterLabel then
-            self.frame.CharacterDropdown.FilterLabel:ClearAllPoints()
-            self.frame.CharacterDropdown.FilterLabel:SetPoint("TOPLEFT", self.frame.FilterPanel, "TOPLEFT", 18, -8)
-        end
-        if self.frame.ResetFiltersButton then
-            self.frame.ResetFiltersButton:Hide()
-        end
-        if self.frame.InsightsScorePanel then self.frame.InsightsScorePanel:Show() end
-        if self.frame.InsightsScoreTitle then self.frame.InsightsScoreTitle:Show() end
-    elseif isHistory then
-        if self.frame.FilterPanel and self.frame.SummaryPanel then
-            self.frame.FilterPanel:ClearAllPoints()
-            self.frame.FilterPanel:SetPoint("TOPLEFT", self.frame.SummaryPanel, "BOTTOMLEFT", 0, -12)
-        end
-        SetDropdownVisible(self.frame.DungeonDropdown, true)
-        SetDropdownVisible(self.frame.KeystoneDropdown, true)
-        SetDropdownVisible(self.frame.ResultDropdown, true)
-        SetDropdownVisible(self.frame.RoleDropdown, true)
-        SetDropdownVisible(self.frame.ClassSpecHeroDropdown, true)
-        SetDropdownVisible(self.frame.CharacterDropdown, true)
-        if self.frame.CharacterDropdown then
-            self.frame.CharacterDropdown:ClearAllPoints()
-            self.frame.CharacterDropdown:SetPoint("TOPLEFT", self.frame.FilterPanel, "TOPLEFT", -2, -68)
-        end
-        if self.frame.CharacterDropdown and self.frame.CharacterDropdown.FilterLabel then
-            self.frame.CharacterDropdown.FilterLabel:ClearAllPoints()
-            self.frame.CharacterDropdown.FilterLabel:SetPoint("TOPLEFT", self.frame.FilterPanel, "TOPLEFT", 18, -54)
-        end
-        if self.frame.ResetFiltersButton then self.frame.ResetFiltersButton:Show() end
-        if self.frame.InsightsScorePanel then self.frame.InsightsScorePanel:Hide() end
-        if self.frame.InsightsScoreTitle then self.frame.InsightsScoreTitle:Hide() end
-    else
-        -- Tier List: filter panel hidden; also hide dropdown labels since they are parented to frame, not FilterPanel
-        SetDropdownVisible(self.frame.DungeonDropdown, false)
-        SetDropdownVisible(self.frame.KeystoneDropdown, false)
-        SetDropdownVisible(self.frame.ResultDropdown, false)
-        SetDropdownVisible(self.frame.RoleDropdown, false)
-        SetDropdownVisible(self.frame.ClassSpecHeroDropdown, false)
-        SetDropdownVisible(self.frame.CharacterDropdown, false)
-        if self.frame.ResetFiltersButton then self.frame.ResetFiltersButton:Hide() end
-        if self.frame.InsightsScorePanel then self.frame.InsightsScorePanel:Hide() end
-        if self.frame.InsightsScoreTitle then self.frame.InsightsScoreTitle:Hide() end
-    end
-
-    if isInsights then
+    if page == "insights" then
         self:UpdateInsightsDisplay()
-    elseif isTierList then
+    elseif page == "tierlist" then
         self:UpdateTierListDisplay()
-    else
+    elseif page == "history" then
         self:UpdateDisplay()
     end
 end
@@ -2543,48 +2257,37 @@ function HistoryViewer:Show()
     self.selectedSeasonFilter = nil
     self:ResetNonSeasonFilters()
     self:PopulateFilters()
-    -- Sync auto-report checkbox with current saved setting
-    if frame.AutoReportCheck then
-        local v = StormsDungeonDataDB and StormsDungeonDataDB.settings and StormsDungeonDataDB.settings.autoReportToParty
-        frame.AutoReportCheck:SetChecked(v == true)
-    end
-    if frame.PlayerTooltipCheck then
-        local v = StormsDungeonDataDB and StormsDungeonDataDB.settings and StormsDungeonDataDB.settings.playerTooltipEnabled
-        if v == nil then v = false end
-        frame.PlayerTooltipCheck:SetChecked(v == true)
+    if frame.SettingsPanel:IsShown() then
+        for _, t in ipairs(frame.SettingsPanel.Toggles or {}) do t:Refresh() end
     end
     frame:Show()
+    self:PlayOpenAnimation()
 end
 
 function HistoryViewer:ShowAtAnchor(anchorFrame)
-    if MPT.Scoreboard and MPT.Scoreboard.Hide then
-        MPT.Scoreboard:Hide()
+    self:Show()
+    if anchorFrame and self.frame then
+        self.frame:ClearAllPoints()
+        self.frame:SetPoint("TOPLEFT", anchorFrame, "TOPRIGHT", 12, 0)
     end
-    local frame = self:Create()
-    self.selectedSeasonFilter = nil
-    self:ResetNonSeasonFilters()
-    self:PopulateFilters()
-    -- Sync auto-report checkbox with current saved setting
-    if frame.AutoReportCheck then
-        local v = StormsDungeonDataDB and StormsDungeonDataDB.settings and StormsDungeonDataDB.settings.autoReportToParty
-        frame.AutoReportCheck:SetChecked(v == true)
-    end
-    if frame.PlayerTooltipCheck then
-        local v = StormsDungeonDataDB and StormsDungeonDataDB.settings and StormsDungeonDataDB.settings.playerTooltipEnabled
-        if v == nil then v = false end
-        frame.PlayerTooltipCheck:SetChecked(v == true)
-    end
-
-    if anchorFrame and frame then
-        frame:ClearAllPoints()
-        frame:SetPoint("TOPLEFT", anchorFrame, "TOPRIGHT", 12, 0)
-    end
-    frame:Show()
 end
 
 function HistoryViewer:Hide()
     if self.frame then
         self.frame:Hide()
+    end
+end
+
+-- Run tiles pop in a few at a time when the window opens.
+function HistoryViewer:PlayOpenAnimation()
+    local Theme = MPT.Theme
+    if not self.frame or not Theme:AnimationsEnabled() then return end
+    for i, tile in ipairs(self.frame.RunRows or {}) do
+        if i > 16 then break end
+        tile:SetAlpha(0)
+        Theme:Tween(tile, 0.3, (i - 1) * 0.035, function(_, raw)
+            tile:SetAlpha(raw)
+        end)
     end
 end
 
@@ -2818,29 +2521,17 @@ function HistoryViewer:PopulateFilters()
         self:UpdateDisplay()
     end)
 
-    -- Dungeon dropdown (multi-select)
-    local dungeonCounts = {}
-    local dungeonNamesByID = {}
+    -- Dungeon dropdown (multi-select), one entry per dungeon name. The same dungeon can be
+    -- saved under more than one map ID, so names (not IDs) are the filter keys.
     local dungeonNameCounts = {}
     for _, run in ipairs(seasonRuns) do
-        local mapID = run.dungeonID or run.dungeonId or 0
         local name = run.dungeonName or "Unknown"
-        if mapID ~= 0 then
-            dungeonCounts[mapID] = (dungeonCounts[mapID] or 0) + 1
-            if not dungeonNamesByID[mapID] then
-                dungeonNamesByID[mapID] = name
-            end
-        else
-            dungeonNameCounts[name] = (dungeonNameCounts[name] or 0) + 1
-        end
+        dungeonNameCounts[name] = (dungeonNameCounts[name] or 0) + 1
     end
 
     local dungeons = {}
-    for id, count in pairs(dungeonCounts) do
-        table.insert(dungeons, {id = id, name = dungeonNamesByID[id] or "Unknown", count = count})
-    end
     for name, count in pairs(dungeonNameCounts) do
-        table.insert(dungeons, {id = 0, name = name, count = count})
+        table.insert(dungeons, {id = name, name = name, count = count})
     end
     table.sort(dungeons, function(a, b) return a.name < b.name end)
 
@@ -3062,9 +2753,13 @@ function HistoryViewer:PopulateFilters()
                     end)
                 end
             end
-            info.checked = (next(self.selectedClassSpecHero.classes) == nil and
-                           next(self.selectedClassSpecHero.specs) == nil and
-                           next(self.selectedClassSpecHero.heroTalents) == nil)
+            -- checked must be a function: UIDropDownMenu_Refresh only re-evaluates
+            -- function values and treats booleans as unchecked.
+            info.checked = function()
+                return next(self.selectedClassSpecHero.classes) == nil and
+                       next(self.selectedClassSpecHero.specs) == nil and
+                       next(self.selectedClassSpecHero.heroTalents) == nil
+            end
             UIDropDownMenu_AddButton(info, level)
 
             for _, classData in ipairs(GAME_CLASS_DATA) do
@@ -3088,7 +2783,9 @@ function HistoryViewer:PopulateFilters()
                         end)
                     end
                 end
-                info.checked = (self.selectedClassSpecHero.classes[classToken] == true)
+                info.checked = function()
+                    return self.selectedClassSpecHero.classes[classToken] == true
+                end
                 if RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken] then
                     local c = RAID_CLASS_COLORS[classToken]
                     info.colorCode = string.format("|cff%02x%02x%02x", c.r * 255, c.g * 255, c.b * 255)
@@ -3125,7 +2822,9 @@ function HistoryViewer:PopulateFilters()
                         end)
                     end
                 end
-                info.checked = (self.selectedClassSpecHero.specs[specKey] == true)
+                info.checked = function()
+                    return self.selectedClassSpecHero.specs[specKey] == true
+                end
                 UIDropDownMenu_AddButton(info, level)
             end
             return
@@ -3154,7 +2853,9 @@ function HistoryViewer:PopulateFilters()
                         end)
                     end
                 end
-                info.checked = (self.selectedClassSpecHero.heroTalents[heroPathKey] == true)
+                info.checked = function()
+                    return self.selectedClassSpecHero.heroTalents[heroPathKey] == true
+                end
                 UIDropDownMenu_AddButton(info, level)
             end
             return
@@ -3245,7 +2946,7 @@ function HistoryViewer:UpdateInsightsDisplay()
             local barBg = row:CreateTexture(nil, "BACKGROUND")
             barBg:SetPoint("LEFT", row, "LEFT", 184, 0)
             barBg:SetSize(280, 10)
-            barBg:SetColorTexture(0.12, 0.12, 0.12, 0.9)
+            barBg:SetColorTexture(MPT.Theme:Unpack("raised"))
 
             local bar = CreateFrame("StatusBar", nil, row)
             bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
@@ -3253,7 +2954,7 @@ function HistoryViewer:UpdateInsightsDisplay()
             bar:SetSize(280, 10)
             bar:SetMinMaxValues(0, 1)
             bar:SetValue(0)
-            bar:SetStatusBarColor(0.20, 0.75, 1.00, 1)
+            bar:SetStatusBarColor(MPT.Theme:Unpack("good"))
 
             local valueText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             valueText:SetPoint("LEFT", row, "LEFT", 470, 0)
@@ -3362,13 +3063,12 @@ function HistoryViewer:UpdateInsightsDisplay()
         card:SetSize(854, height)
         SetBackdropCompat(card, cardBackdrop, {0.06, 0.06, 0.08, 0.72}, {0.45, 0.45, 0.45, 0.75})
 
-        local titleFs = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        titleFs:SetPoint("TOPLEFT", card, "TOPLEFT", 10, -8)
+        local titleFs = MPT.Theme:Text(card, 13, "head", "text")
+        titleFs:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -8)
         titleFs:SetText(title)
-        titleFs:SetTextColor(1, 0.84, 0, 1)
 
         local divider = card:CreateTexture(nil, "ARTWORK")
-        divider:SetColorTexture(1, 1, 1, 0.12)
+        divider:SetColorTexture(MPT.Theme:Unpack("line"))
         divider:SetPoint("TOPLEFT", card, "TOPLEFT", 8, -24)
         divider:SetPoint("TOPRIGHT", card, "TOPRIGHT", -8, -24)
         divider:SetHeight(1)
@@ -3385,7 +3085,7 @@ function HistoryViewer:UpdateInsightsDisplay()
                 local barBg = card:CreateTexture(nil, "BACKGROUND")
                 barBg:SetPoint("TOPLEFT", card, "TOPLEFT", 250, lineY - 2)
                 barBg:SetSize(430, 12)
-                barBg:SetColorTexture(0.12, 0.12, 0.12, 0.9)
+                barBg:SetColorTexture(MPT.Theme:Unpack("raised"))
 
                 local bar = CreateFrame("StatusBar", nil, card)
                 bar:SetStatusBarTexture("Interface\\Buttons\\WHITE8X8")
@@ -3404,7 +3104,7 @@ function HistoryViewer:UpdateInsightsDisplay()
                 end
                 bar:SetMinMaxValues(0, maxValue)
                 bar:SetValue(value)
-                local c = line.color or {0.2, 0.7, 1.0, 1}
+                local c = line.color or MPT.Theme.C.gold
                 bar:SetStatusBarColor(c[1], c[2], c[3], c[4] or 1)
 
                 local valueText = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -3734,6 +3434,13 @@ function HistoryViewer:UpdateInsightsDisplay()
     end
     AddCard("Recent Synergy", synergyLines)
 
+    local function FormatGapValue(metric, value)
+        if metric.key == "deaths" or metric.key == "interrupts" or metric.key == "dispels" then
+            return string.format("%.1f", value or 0)
+        end
+        return FormatCompactHundredth(value or 0)
+    end
+
     local gapLines = {}
     local under = insights.underperformingMetrics or {}
     local over = insights.outperformingMetrics or {}
@@ -3768,8 +3475,9 @@ function HistoryViewer:UpdateInsightsDisplay()
                 math.floor((metric.significantlyBelowRate or 0) * 100 + 0.5)
             ))
             table.insert(gapLines, string.format(
-                "  Average deficit: %s",
-                MPT.Utils:FormatNumber(math.floor(metric.avgDelta or 0))
+                "  You: %s per run, role benchmark: %s",
+                FormatGapValue(metric, metric.ownerAvg),
+                FormatGapValue(metric, metric.teammateAvg)
             ))
             table.insert(gapLines, string.format(
                 "  Data sources: %d peer-run, %d season-baseline",
@@ -3810,8 +3518,9 @@ function HistoryViewer:UpdateInsightsDisplay()
                 math.floor((metric.significantlyAboveRate or 0) * 100 + 0.5)
             ))
             table.insert(gapLines, string.format(
-                "  Average surplus: %s",
-                MPT.Utils:FormatNumber(math.floor(metric.avgDelta or 0))
+                "  You: %s per run, role benchmark: %s",
+                FormatGapValue(metric, metric.ownerAvg),
+                FormatGapValue(metric, metric.teammateAvg)
             ))
             table.insert(gapLines, string.format(
                 "  Data sources: %d peer-run, %d season-baseline",
@@ -3843,13 +3552,37 @@ function HistoryViewer:UpdateInsightsDisplay()
     end
     AddCard("Recent Personal Bests", pbLines)
 
+    local function Hex(colorName)
+        local c = MPT.Theme.C[colorName] or MPT.Theme.C.text
+        return string.format("|cff%02x%02x%02x", math.floor(c[1] * 255), math.floor(c[2] * 255), math.floor(c[3] * 255))
+    end
+    local categoryColors = {
+        SURVIVAL = "bad",
+        FOCUS = "gold",
+        RATING = "pb",
+        ["KEY LEVEL"] = "pb",
+        ["YOUR PLAY"] = "gold",
+        GROUP = "good",
+        TREND = "bad",
+    }
+
     local recommendationLines = {}
-    if not insights.recommendations or #insights.recommendations == 0 then
-        table.insert(recommendationLines, "Not enough data yet for targeted recommendations.")
+    local recs = insights.recommendations or {}
+    if #recs == 0 then
+        if (insights.totalRuns or 0) >= 10 then
+            table.insert(recommendationLines, "Nothing is consistently costing you keys right now. Keep pushing your best dungeons.")
+        else
+            table.insert(recommendationLines, "Not enough data yet for targeted recommendations.")
+        end
     else
-        for i, rec in ipairs(insights.recommendations) do
-            if i > 6 then break end
-            table.insert(recommendationLines, "- " .. tostring(rec))
+        for i, rec in ipairs(recs) do
+            table.insert(recommendationLines, string.format("%s%d. %s|r  %s%s|r",
+                Hex(categoryColors[rec.category] or "gold"), i, rec.category or "",
+                Hex("text"), rec.headline or ""))
+            table.insert(recommendationLines, Hex("muted") .. (rec.detail or "") .. "|r")
+            if i < #recs then
+                table.insert(recommendationLines, " ")
+            end
         end
     end
     AddCard("Recommendations", recommendationLines)
@@ -4648,7 +4381,7 @@ function HistoryViewer:UpdateTierListDisplay()
     local CHIP_SPACING   = 4
     local ROW_PADDING_V  = 3
     local ROW_V_PAD      = 6   -- vertical padding inside row (top & bottom)
-    local CONTENT_WIDTH  = 900
+    local CONTENT_WIDTH  = 860
     local CHIPS_WIDTH    = CONTENT_WIDTH - LABEL_WIDTH - 6  -- available width for chips
     local ICON_SIZE      = 44
 
@@ -4819,19 +4552,6 @@ end
 -- END TIER LIST
 -- ============================================================
 
-local function OpenRunScoreboardFromHistory(historyViewer, run)
-    if not historyViewer or not run then
-        return
-    end
-
-    historyViewer:Hide()
-
-    if MPT.UI and MPT.UI.ShowScoreboard then
-        MPT.UI:ShowScoreboard(run)
-    elseif MPT.Scoreboard and MPT.Scoreboard.Show then
-        MPT.Scoreboard:Show(run)
-    end
-end
 
 function HistoryViewer:UpdateDisplay()
     local function ComputeStatsFromRuns(runs, characterName)
@@ -5021,9 +4741,9 @@ function HistoryViewer:UpdateDisplay()
     local stats
     local hasAnyFilter = (next(self.selectedDungeons) ~= nil) or self.selectedDungeon or self.selectedDungeonName
     if hasAnyFilter then
-        self.frame.StatsTitle:SetText("Dungeon Statistics")
+        self.frame.StatsTitle:SetText("DUNGEON STATISTICS")
     else
-        self.frame.StatsTitle:SetText("Overall Statistics")
+        self.frame.StatsTitle:SetText("OVERALL STATISTICS")
     end
     
     -- Populate run history
@@ -5059,8 +4779,7 @@ function HistoryViewer:UpdateDisplay()
     if next(self.selectedDungeons) ~= nil then
         local filteredRuns = {}
         for _, run in ipairs(runs) do
-            local runDungeonID = run.dungeonID or run.dungeonId
-            if self.selectedDungeons[runDungeonID] then
+            if self.selectedDungeons[run.dungeonName or "Unknown"] then
                 table.insert(filteredRuns, run)
             end
         end
@@ -5245,10 +4964,6 @@ function HistoryViewer:UpdateDisplay()
         end
     end
 
-    for _, row in ipairs(self.frame.RunRows) do
-        row:Hide()
-    end
-    self.frame.RunRows = {}
     
     local function GetRunBestStats(run)
         local bestDamage, bestHealing, bestInterrupts = 0, 0, 0
@@ -5335,253 +5050,235 @@ function HistoryViewer:UpdateDisplay()
         end
     end
 
-    local runY = 0
-    for idx, run in ipairs(runs) do
-        local runRow = CreateFrame("Frame", nil, self.frame.RunContent)
-        runRow:SetSize(840, 22)
-        runRow:SetPoint("TOPLEFT", self.frame.RunContent, "TOPLEFT", 0, -runY)
-        runRow:EnableMouse(true)
-        runRow:SetScript("OnMouseUp", function(_, button)
-            if button == "LeftButton" then
-                OpenRunScoreboardFromHistory(self, run)
-            end
+    -- Run tiles (pooled; rebuilt in place on every refresh)
+    for _, tile in ipairs(self.frame.RunRows) do
+        tile:Hide()
+    end
+    self.frame.RunRows = {}
+
+    local Theme = MPT.Theme
+    local pool = self.frame.RunTilePool
+    local content = self.frame.RunContent
+    local columns, gap, tileH = HistoryViewer.TILE_COLUMNS, HistoryViewer.TILE_GAP, HistoryViewer.TILE_H
+    local tileW = math.floor((content:GetWidth() - gap * (columns - 1)) / columns)
+
+    local function StatColumn(tile, labelText, x)
+        local label = Theme:Text(tile, 9, "head", "muted")
+        label:SetPoint("BOTTOMLEFT", tile, "BOTTOMLEFT", x, 40)
+        label:SetText(labelText)
+        local value = Theme:Text(tile, 13, "body", "text")
+        value:SetPoint("TOPLEFT", label, "BOTTOMLEFT", 0, -2)
+        return value, label
+    end
+
+    local function CreateTile()
+        local tile = CreateFrame("Button", nil, content)
+        tile:SetSize(tileW, tileH)
+        tile:RegisterForClicks("LeftButtonUp")
+        Theme:Panel(tile, "surface", "line")
+
+        tile.Art = tile:CreateTexture(nil, "BACKGROUND", nil, -6)
+        tile.Art:SetPoint("TOPLEFT", tile, "TOPLEFT", 4, -4)
+        tile.Art:SetPoint("TOPRIGHT", tile, "TOPRIGHT", -4, -4)
+        tile.Art:SetHeight(58)
+        tile.Art:SetAlpha(0.22)
+
+        tile.Key = Theme:Text(tile, 18, "head", "text")
+        tile.Key:SetPoint("TOPLEFT", tile, "TOPLEFT", 12, -10)
+
+        tile.Pill = CreateFrame("Frame", nil, tile)
+        tile.Pill:SetSize(70, 18)
+        tile.Pill:SetPoint("TOPRIGHT", tile, "TOPRIGHT", -10, -11)
+        Theme:Panel(tile.Pill, "raised", "raised")
+        tile.PillText = Theme:Text(tile.Pill, 11, "body", "good", "CENTER")
+        tile.PillText:SetPoint("CENTER", tile.Pill, "CENTER", 0, 0)
+
+        tile.Name = Theme:Text(tile, 13, "head", "text")
+        tile.Name:SetPoint("TOPLEFT", tile, "TOPLEFT", 12, -38)
+        tile.Name:SetWidth(tileW - 24)
+        tile.Name:SetWordWrap(true)
+        tile.Name:SetMaxLines(2)
+
+        local third = math.floor((tileW - 24) / 3)
+        tile.Time = StatColumn(tile, "TIME", 12)
+        tile.Output, tile.OutputLabel = StatColumn(tile, "DPS", 12 + third)
+        tile.Kicks = StatColumn(tile, "KICKS", 12 + third * 2)
+
+        tile.Footer = Theme:Text(tile, 11, "body", "muted")
+        tile.Footer:SetPoint("BOTTOMLEFT", tile, "BOTTOMLEFT", 12, 10)
+        tile.Footer:SetWidth(tileW - 44)
+
+        tile.Star = tile:CreateTexture(nil, "OVERLAY")
+        tile.Star:SetSize(14, 14)
+        tile.Star:SetPoint("BOTTOMRIGHT", tile, "BOTTOMRIGHT", -10, 9)
+        tile.Star:SetTexture("Interface\\Icons\\Achievement_Dungeon_HEROIC_GloryoftheRaider")
+        tile.Star:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+        tile.Delete = CreateFrame("Button", nil, tile)
+        tile.Delete:SetSize(18, 18)
+        tile.Delete:SetPoint("TOPRIGHT", tile, "TOPRIGHT", 6, 6)
+        tile.Delete:SetFrameLevel(tile:GetFrameLevel() + 5)
+        Theme:Panel(tile.Delete, "raised", "line")
+        local x = Theme:Text(tile.Delete, 11, "body", "bad", "CENTER")
+        x:SetPoint("CENTER", tile.Delete, "CENTER", 0, 1)
+        x:SetText("x")
+        tile.Delete:Hide()
+        tile.Delete:SetScript("OnLeave", function(b)
+            GameTooltip:Hide()
+            if not tile:IsMouseOver() then b:Hide() end
         end)
 
-        local bg = runRow:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints(runRow)
+        tile:SetScript("OnLeave", function(t)
+            GameTooltip:Hide()
+            Theme:SetPanelColors(t, "surface", "line")
+            if not t.Delete:IsMouseOver() then t.Delete:Hide() end
+        end)
+        return tile
+    end
 
-        local hover = runRow:CreateTexture(nil, "HIGHLIGHT")
-        hover:SetAllPoints(runRow)
-        hover:SetTexture("Interface/QuestFrame/UI-QuestTitleHighlight")
-        hover:SetBlendMode("ADD")
-        hover:SetAlpha(0.16)
+    local function ShowRunTooltip(tile, run, my, pbFlags)
+        GameTooltip:SetOwner(tile, "ANCHOR_RIGHT")
+        GameTooltip:SetText((run.dungeonName or "Unknown") .. " +" .. tostring(run.keystoneLevel or run.dungeonLevel or 0), 1, 1, 1)
+        GameTooltip:AddLine(date("%a %b %d, %I:%M %p", run.timestamp or time()), 0.6, 0.58, 0.66)
+        if run.specName or run.heroName then
+            GameTooltip:AddLine(((run.specName or "") .. "  " .. (run.heroName or "")), 0.8, 0.8, 1)
+        end
+        if my then
+            local function Line(label, text, isPB)
+                GameTooltip:AddDoubleLine(label, text, 0.6, 0.58, 0.66, isPB and 1 or 1, isPB and 0.5 or 1, isPB and 0 or 1)
+            end
+            GameTooltip:AddLine(" ")
+            Line("Damage", MPT.Utils:FormatNumber(my.damage), pbFlags.damage)
+            Line("DPS", MPT.Utils:FormatNumber(my.damagePerSecond), pbFlags.dps)
+            Line("Healing", MPT.Utils:FormatNumber(my.healing), pbFlags.healing)
+            Line("HPS", MPT.Utils:FormatNumber(my.healingPerSecond), pbFlags.hps)
+            Line("Interrupts", tostring(my.interrupts), pbFlags.interrupts)
+            Line("Dispels", tostring(my.dispels), pbFlags.dispels)
+            Line("Avoidable damage", MPT.Utils:FormatNumber(my.avoidableDamageTaken), false)
+            Line("Deaths", tostring(my.deaths), false)
+            if pbFlags.any then
+                GameTooltip:AddLine("Orange = personal best for this dungeon", 1, 0.5, 0)
+            end
+        end
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Click to open the scoreboard", 1, 0.75, 0.28)
+        GameTooltip:Show()
+    end
+
+    local function ConfirmDelete(run)
+        StaticPopupDialogs["STORMSDUNGEONDATA_DELETE_RUN"] = {
+            text = "Delete this run?\n\n" .. (run.dungeonName or "Unknown") .. " +" .. (run.keystoneLevel or run.dungeonLevel or 0),
+            button1 = "Delete",
+            button2 = "Cancel",
+            OnAccept = function()
+                if MPT.Database:DeleteRun(run.id) then
+                    print("|cff00ffaa[StormsDungeonData]|r Run deleted")
+                    self:UpdateDisplay()
+                else
+                    print("|cff00ffaa[StormsDungeonData]|r Error: Could not delete run")
+                end
+            end,
+            timeout = 0,
+            whileDead = true,
+            hideOnEscape = true,
+            preferredIndex = 3,
+        }
+        StaticPopup_Show("STORMSDUNGEONDATA_DELETE_RUN")
+    end
+
+    for idx, run in ipairs(runs) do
+        local tile = pool[idx]
+        if not tile then
+            tile = CreateTile()
+            pool[idx] = tile
+        end
+        local col = (idx - 1) % columns
+        local row = math.floor((idx - 1) / columns)
+        tile:ClearAllPoints()
+        tile:SetPoint("TOPLEFT", content, "TOPLEFT", col * (tileW + gap), -row * (tileH + gap))
+        tile:SetAlpha(1)
 
         local level = run.keystoneLevel or run.dungeonLevel or 0
-        local myStats = GetMyPlayerStatsInRun(run)
-        local dispDamage = myStats and (myStats.damage or 0) or 0
-        local dispHealing = myStats and (myStats.healing or 0) or 0
-        local dispInterrupts = myStats and (myStats.interrupts or 0) or 0
-        local dispDispels = myStats and (myStats.dispels or 0) or 0
-        local dispDPS = myStats and (myStats.damagePerSecond or 0) or 0
-        local dispHPS = myStats and (myStats.healingPerSecond or 0) or 0
-        local dispAvoidableDamage = myStats and (myStats.avoidableDamageTaken or 0) or 0
-        local dispDeaths = myStats and (myStats.deaths or 0) or 0
-
-        if idx % 2 == 0 then
-            bg:SetColorTexture(0.1, 0.1, 0.1, 0.18)
-        else
-            bg:SetColorTexture(0, 0, 0, 0)
-        end
-
-        local x = 5
-
-        local dungeonText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dungeonText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        dungeonText:SetWidth(155)
-        dungeonText:SetJustifyH("LEFT")
-        dungeonText:SetText(run.dungeonName or "--")
-        x = x + 155
-
-        local levelText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        levelText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        levelText:SetWidth(35)
-        levelText:SetJustifyH("CENTER")
-        levelText:SetText("+" .. tostring(level))
-        x = x + 35
-
-        local durationText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        durationText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        durationText:SetWidth(55)
-        durationText:SetJustifyH("CENTER")
-        local durationDisplay
-        if run.abandonReason == "abandon" then
-            durationDisplay = "Abandon"
-        else
-            durationDisplay = MPT.Utils:FormatDuration(run.duration or 0)
-        end
-        durationText:SetText(durationDisplay)
-        local overTime = run.abandonReason == "abandon" or RunIsFailed(run)
-        if overTime then
-            durationText:SetTextColor(1, 0.27, 0.27, 1)
-        else
-            durationText:SetTextColor(1, 0.84, 0, 1)
-        end
-        x = x + 55
-
-        local specText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        specText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        specText:SetWidth(50)
-        specText:SetJustifyH("CENTER")
-        do
-            local label = ""
-            if run.specIcon then
-                label = "|T" .. tostring(run.specIcon) .. ":14:14:0:0|t"
-            end
-            specText:SetText(label)
-        end
-        x = x + 50
-
-        local heroText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        heroText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        heroText:SetWidth(75)
-        heroText:SetJustifyH("CENTER")
-        heroText:SetTextColor(0.8, 0.8, 1, 1)  -- Light blue tint
-        if run.heroName and run.heroName ~= "" then
-            heroText:SetText(run.heroName)
-        else
-            heroText:SetText("")
-        end
-        x = x + 90
-
-        local dateText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dateText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        dateText:SetWidth(50)
-        dateText:SetJustifyH("CENTER")
-        dateText:SetText(date("%m/%d/%y", run.timestamp or time()))
-        x = x + 50
-
+        local my = GetMyPlayerStatsInRun(run)
+        local isAbandoned = run.abandonReason == "abandon"
+        local failed = isAbandoned or RunIsFailed(run)
         local dungeonKey = run.dungeonName or tostring(run.dungeonId or run.dungeonID or run.dungeon or "--")
-        local isAbandonedRun = run.abandonReason == "abandon"
-        local dmgText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dmgText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        dmgText:SetWidth(70)
-        dmgText:SetJustifyH("RIGHT")
-        local dmgValueText = MPT.Utils:FormatNumber(dispDamage)
-        if not isAbandonedRun and dispDamage > 0 and dispDamage >= (pbDamageByDungeon[dungeonKey] or 0) then
-            dmgValueText = "|cffff8000" .. dmgValueText .. "|r"
-        end
-        dmgText:SetText(dmgValueText)
-        x = x + 70
 
-        local dpsText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dpsText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        dpsText:SetWidth(50)
-        dpsText:SetJustifyH("RIGHT")
-        local dpsValueText = MPT.Utils:FormatNumber(dispDPS)
-        if not isAbandonedRun and dispDPS > 0 and dispDPS >= (pbDPSByDungeon[dungeonKey] or 0) then
-            dpsValueText = "|cffff8000" .. dpsValueText .. "|r"
-        end
-        dpsText:SetText(dpsValueText)
-        x = x + 50
-
-        local healText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        healText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        healText:SetWidth(70)
-        healText:SetJustifyH("RIGHT")
-        local healValueText = MPT.Utils:FormatNumber(dispHealing)
-        if not isAbandonedRun and dispHealing > 0 and dispHealing >= (pbHealingByDungeon[dungeonKey] or 0) then
-            healValueText = "|cffff8000" .. healValueText .. "|r"
-        end
-        healText:SetText(healValueText)
-        x = x + 70
-
-        local hpsText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        hpsText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        hpsText:SetWidth(50)
-        hpsText:SetJustifyH("RIGHT")
-        local hpsValueText = MPT.Utils:FormatNumber(dispHPS)
-        if not isAbandonedRun and dispHPS > 0 and dispHPS >= (pbHPSByDungeon[dungeonKey] or 0) then
-            hpsValueText = "|cffff8000" .. hpsValueText .. "|r"
-        end
-        hpsText:SetText(hpsValueText)
-        x = x + 50
-
-        local intText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        intText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        intText:SetWidth(50)
-        intText:SetJustifyH("CENTER")
-        local intValueText = tostring(dispInterrupts)
-        if not isAbandonedRun and dispInterrupts > 0 and dispInterrupts >= (pbInterruptsByDungeon[dungeonKey] or 0) then
-            intValueText = "|cffff8000" .. intValueText .. "|r"
-        end
-        intText:SetText(intValueText)
-        x = x + 50
-
-        local dispText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dispText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        dispText:SetWidth(40)
-        dispText:SetJustifyH("CENTER")
-        local dispValueText = tostring(dispDispels)
-        if not isAbandonedRun and dispDispels > 0 and dispDispels >= (pbDispelsByDungeon[dungeonKey] or 0) then
-            dispValueText = "|cffff8000" .. dispValueText .. "|r"
-        end
-        dispText:SetText(dispValueText)
-        x = x + 40
-
-        local avoidText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        avoidText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        avoidText:SetWidth(65)
-        avoidText:SetJustifyH("CENTER")
-        local avoidValueText = MPT.Utils:FormatNumber(dispAvoidableDamage)
-        avoidText:SetText(avoidValueText)
-        x = x + 65
-
-        local deathsText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        deathsText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        deathsText:SetWidth(50)
-        deathsText:SetJustifyH("CENTER")
-        local deathsValueText = tostring(dispDeaths)
-        -- Color deaths red if > 0
-        if dispDeaths > 0 then
-            deathsValueText = "|cffff2727" .. deathsValueText .. "|r"
-        end
-        deathsText:SetText(deathsValueText)
-        x = x + 50
-
-        -- MVP indicator
-        local mvpText = runRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        mvpText:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        mvpText:SetWidth(40)
-        mvpText:SetJustifyH("CENTER")
-        if IsPlayerMVP(run) then
-            mvpText:SetText("|TInterface\\Icons\\Achievement_Dungeon_HEROIC_GloryoftheRaider:16:16:0:0|t")
+        local info = Theme:DungeonInfo(run.dungeonID or run.dungeonId)
+        if info and info.background then
+            tile.Art:SetTexture(info.background)
+            tile.Art:SetTexCoord(0, 1, 0.3, 0.6)
+            tile.Art:Show()
         else
-            mvpText:SetText("")
+            tile.Art:Hide()
         end
-        x = x + 40
 
-        -- Delete button
-        local deleteBtn = CreateFrame("Button", nil, runRow)
-        deleteBtn:SetSize(18, 18)
-        deleteBtn:SetPoint("LEFT", runRow, "LEFT", x, 0)
-        deleteBtn:SetNormalTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Up")
-        deleteBtn:SetHighlightTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Highlight")
-        deleteBtn:SetPushedTexture("Interface\\Buttons\\UI-GroupLoot-Pass-Down")
-        deleteBtn:SetScript("OnClick", function()
-            StaticPopupDialogs["STORMSDUNGEONDATA_DELETE_RUN"] = {
-                text = "Delete this run?\n\n" .. (run.dungeonName or "Unknown") .. " +" .. (run.keystoneLevel or run.dungeonLevel or 0),
-                button1 = "Delete",
-                button2 = "Cancel",
-                OnAccept = function()
-                    if MPT.Database:DeleteRun(run.id) then
-                        print("|cff00ffaa[StormsDungeonData]|r Run deleted")
-                        self:UpdateDisplay()
-                    else
-                        print("|cff00ffaa[StormsDungeonData]|r Error: Could not delete run")
-                    end
-                end,
-                timeout = 0,
-                whileDead = true,
-                hideOnEscape = true,
-                preferredIndex = 3,
-            }
-            StaticPopup_Show("STORMSDUNGEONDATA_DELETE_RUN")
+        tile.Key:SetText("+" .. tostring(level))
+        tile.Name:SetText(run.dungeonName or "--")
+
+        local pillText, pillColor
+        if isAbandoned then
+            pillText, pillColor = "Abandoned", "bad"
+        elseif failed then
+            pillText, pillColor = "Depleted", "bad"
+        else
+            local chests = Theme:ChestCount(run.duration, info and info.timeLimit)
+            pillText, pillColor = (chests and chests > 0) and ("Timed +" .. chests) or "Timed", "good"
+        end
+        tile.PillText:SetText(pillText)
+        tile.PillText:SetTextColor(Theme:Unpack(pillColor))
+        tile.Pill:SetWidth(tile.PillText:GetStringWidth() + 16)
+
+        tile.Time:SetText(isAbandoned and "--" or MPT.Utils:FormatDuration(run.duration or 0))
+        tile.Time:SetTextColor(Theme:Unpack(failed and "bad" or "text"))
+
+        local isHealer = run.specRole == "HEALER"
+        local pbFlags = {}
+        if my and not isAbandoned then
+            pbFlags.damage = my.damage > 0 and my.damage >= (pbDamageByDungeon[dungeonKey] or 0)
+            pbFlags.healing = my.healing > 0 and my.healing >= (pbHealingByDungeon[dungeonKey] or 0)
+            pbFlags.interrupts = my.interrupts > 0 and my.interrupts >= (pbInterruptsByDungeon[dungeonKey] or 0)
+            pbFlags.dispels = my.dispels > 0 and my.dispels >= (pbDispelsByDungeon[dungeonKey] or 0)
+            pbFlags.dps = my.damagePerSecond > 0 and my.damagePerSecond >= (pbDPSByDungeon[dungeonKey] or 0)
+            pbFlags.hps = my.healingPerSecond > 0 and my.healingPerSecond >= (pbHPSByDungeon[dungeonKey] or 0)
+            pbFlags.any = pbFlags.damage or pbFlags.healing or pbFlags.interrupts or pbFlags.dispels or pbFlags.dps or pbFlags.hps
+        end
+        local outputValue = my and (isHealer and my.healingPerSecond or my.damagePerSecond) or 0
+        local outputPB = isHealer and pbFlags.hps or pbFlags.dps
+        tile.OutputLabel:SetText(isHealer and "HPS" or "DPS")
+        tile.Output:SetText(outputPB and Theme:Colorize(MPT.Utils:FormatNumber(outputValue), "pb") or MPT.Utils:FormatNumber(outputValue))
+        local kicks = my and my.interrupts or 0
+        tile.Kicks:SetText(pbFlags.interrupts and Theme:Colorize(kicks, "pb") or tostring(kicks))
+
+        local deaths = my and my.deaths or 0
+        local specIcon = run.specIcon and ("|T" .. tostring(run.specIcon) .. ":12:12:0:0|t ") or ""
+        tile.Footer:SetText(specIcon .. date("%b %d", run.timestamp or time()) .. " · "
+            .. (deaths > 0 and Theme:Colorize(deaths .. (deaths == 1 and " death" or " deaths"), "bad") or "0 deaths"))
+        tile.Star:SetShown(IsPlayerMVP(run))
+
+        tile:SetScript("OnClick", function()
+            OpenRunScoreboardFromHistory(self, run)
         end)
-        deleteBtn:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetText("Delete Run", 1, 1, 1)
-            GameTooltip:AddLine("Click to permanently delete this run", 1, 0.82, 0, true)
+        tile:SetScript("OnEnter", function(t)
+            Theme:SetPanelColors(t, "raised", "muted")
+            t.Delete:Show()
+            ShowRunTooltip(t, run, my, pbFlags)
+        end)
+        tile.Delete:SetScript("OnClick", function() ConfirmDelete(run) end)
+        tile.Delete:SetScript("OnEnter", function(b)
+            GameTooltip:SetOwner(b, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Delete run", 1, 1, 1)
+            GameTooltip:AddLine("Removes this run from your history.", 1, 0.82, 0, true)
             GameTooltip:Show()
         end)
-        deleteBtn:SetScript("OnLeave", function()
-            GameTooltip:Hide()
-        end)
 
-        table.insert(self.frame.RunRows, runRow)
-        runY = runY + 24
+        tile:Show()
+        table.insert(self.frame.RunRows, tile)
     end
-    
-    self.frame.RunContent:SetHeight(math.max(runY, 1))
+
+    local rowsUsed = math.ceil(#runs / columns)
+    content:SetHeight(math.max(1, rowsUsed * (tileH + gap)))
+    self.frame.RunsEmpty:SetShown(#runs == 0)
     if self.activePage == "insights" then
         self:UpdateInsightsDisplay()
     elseif self.activePage == "tierlist" then

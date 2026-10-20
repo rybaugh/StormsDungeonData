@@ -355,16 +355,12 @@ local function AssignRolesFromPlayerData(playerData)
     return assignedRole, n
 end
 
--- Build a short friend-list note from our good/bad counts (e.g. "SDD: Good +5, Bad +2")
+-- Build a short friend-list note from our star average (e.g. "SDD: 4.3/5 stars (7 runs)")
 local function GetRatingNoteForFriend(playerName)
     if not MPT.Database or not playerName then return "" end
-    local goodCount = MPT.Database.GetPlayerGoodCount and MPT.Database:GetPlayerGoodCount(playerName) or 0
-    local badCount = MPT.Database.GetPlayerBadCount and MPT.Database:GetPlayerBadCount(playerName) or 0
-    if goodCount == 0 and badCount == 0 then return "" end
-    local parts = {}
-    if goodCount > 0 then parts[#parts + 1] = "Good +" .. goodCount end
-    if badCount > 0 then parts[#parts + 1] = "Bad +" .. badCount end
-    return "SDD: " .. table.concat(parts, ", ")
+    local average, count = MPT.Database:GetPlayerRatingSummary(playerName)
+    if not average then return "" end
+    return string.format("SDD: %.1f/5 stars (%d %s)", average, count, count == 1 and "run" or "runs")
 end
 
 -- Check if playerName is on the current character's friend list (by iterating C_FriendList)
@@ -550,490 +546,363 @@ local function GetHeroTalentInfoSafe()
     return nil
 end
 
--- Helper function to set backdrop compatibility with WoW 12.0+
-local function SetBackdropCompat(frame, backdropInfo, backdropColor, backdropBorderColor)
-    if frame.SetBackdrop then
-        -- Legacy API (pre-12.0)
-        frame:SetBackdrop(backdropInfo)
-        if backdropColor then
-            frame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], backdropColor[4])
-        end
-        if backdropBorderColor then
-            frame:SetBackdropBorderColor(backdropBorderColor[1], backdropBorderColor[2], backdropBorderColor[3], backdropBorderColor[4])
-        end
-    elseif frame.SetBackdropInfo then
-        -- New API (WoW 12.0+)
-        frame:SetBackdropInfo(backdropInfo)
-        if backdropColor then
-            frame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], backdropColor[4])
-        end
-        if backdropBorderColor then
-            frame:SetBackdropBorderColor(backdropBorderColor[1], backdropBorderColor[2], backdropBorderColor[3], backdropBorderColor[4])
-        end
-    else
-        -- No backdrop support, skip
-        return
+-- ---------------------------------------------------------------------------
+-- Party Cards layout
+-- ---------------------------------------------------------------------------
+
+local T = function() return MPT.Theme end
+
+local CARD_W, MVP_W, CARD_GAP = 204, 240, 12
+local CARD_H, MVP_H = 352, 376
+local STAR_SIZE, STAR_GAP = 18, 3
+local FRIEND_BTN_W = 60
+local WINDOW_W = 20 + MVP_W + (CARD_W * 4) + (CARD_GAP * 4) + 20
+local WINDOW_H = 540
+local CARDS_BOTTOM = 64
+
+local ROLE_ATLAS = {
+    TANK = "roleicon-tiny-tank",
+    HEALER = "roleicon-tiny-healer",
+    DAMAGER = "roleicon-tiny-dps",
+}
+
+local function RoleMarkup(role)
+    local atlas = ROLE_ATLAS[role or "DAMAGER"] or ROLE_ATLAS.DAMAGER
+    if C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(atlas) then
+        return "|A:" .. atlas .. ":12:12|a "
     end
+    return ""
+end
+
+local function SetCardGradient(tex, r, g, b)
+    tex:SetTexture(MPT.Theme.TEX_WHITE)
+    if CreateColor and tex.SetGradient then
+        local ok = pcall(tex.SetGradient, tex, "VERTICAL", CreateColor(r, g, b, 0), CreateColor(r, g, b, 0.30))
+        if ok then return end
+    end
+    tex:SetColorTexture(r, g, b, 0.15)
+end
+
+-- One stat line inside a card: label left, value right, optional bar below.
+local function AddCardStat(card, labelText, hasBar, y)
+    local Theme = T()
+    local label = Theme:Text(card, 11, "body", "muted")
+    label:SetPoint("TOPLEFT", card.StatsBlock, "TOPLEFT", 0, -y)
+    label:SetText(labelText)
+
+    local value = Theme:Text(card, 12, "body", "text", "RIGHT")
+    value:SetPoint("TOPRIGHT", card.StatsBlock, "TOPRIGHT", 0, -y)
+    value:SetWidth(130)
+
+    local bar
+    if hasBar then
+        bar = Theme:Bar(card, 3)
+        bar:SetPoint("TOPLEFT", card.StatsBlock, "TOPLEFT", 0, -(y + 15))
+        bar:SetPoint("TOPRIGHT", card.StatsBlock, "TOPRIGHT", 0, -(y + 15))
+        return value, bar, y + 24
+    end
+    return value, nil, y + 17
+end
+
+local function CreateCard(parent, index)
+    local Theme = T()
+    local isLead = (index == 1)
+    local w, h = isLead and MVP_W or CARD_W, isLead and MVP_H or CARD_H
+    local avatarSize = isLead and 56 or 44
+
+    local card = CreateFrame("Frame", nil, parent)
+    card:SetSize(w, h)
+    card.isLead = isLead
+    Theme:Panel(card, "surface", "line")
+    card.Glow = Theme:Glow(card, "gold", 16)
+
+    card.Band = card:CreateTexture(nil, "BACKGROUND", nil, -6)
+    -- Inset past the rounded corners so the square band never pokes out
+    card.Band:SetPoint("TOPLEFT", card, "TOPLEFT", 4, -4)
+    card.Band:SetPoint("TOPRIGHT", card, "TOPRIGHT", -4, -4)
+    card.Band:SetHeight(isLead and 128 or 110)
+
+    -- MVP tag (lead card only)
+    local tag = CreateFrame("Frame", nil, card)
+    tag:SetSize(40, 16)
+    tag:SetPoint("TOPLEFT", card, "TOPLEFT", 10, -10)
+    Theme:Panel(tag, "gold", "gold")
+    local tagText = Theme:Text(tag, 10, "head", "bg", "CENTER")
+    tagText:SetPoint("CENTER", tag, "CENTER", 0, 0)
+    tagText:SetText("MVP")
+    tag:Hide()
+    card.MVPTag = tag
+
+    card.RankText = Theme:Text(card, 12, "head", "muted", "RIGHT")
+    card.RankText:SetPoint("TOPRIGHT", card, "TOPRIGHT", -12, -11)
+
+    -- Avatar: class-colored ring with a round spec icon
+    local mask = card:CreateMaskTexture()
+    mask:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    mask:SetSize(avatarSize, avatarSize)
+    mask:SetPoint("TOP", card, "TOP", 0, -18)
+
+    local ringMask = card:CreateMaskTexture()
+    ringMask:SetTexture("Interface\\CHARACTERFRAME\\TempPortraitAlphaMask", "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    ringMask:SetSize(avatarSize + 6, avatarSize + 6)
+    ringMask:SetPoint("CENTER", mask, "CENTER", 0, 0)
+
+    card.Ring = card:CreateTexture(nil, "ARTWORK", nil, 1)
+    card.Ring:SetAllPoints(ringMask)
+    card.Ring:SetColorTexture(1, 1, 1, 1)
+    card.Ring:AddMaskTexture(ringMask)
+
+    card.Avatar = card:CreateTexture(nil, "ARTWORK", nil, 2)
+    card.Avatar:SetAllPoints(mask)
+    card.Avatar:AddMaskTexture(mask)
+
+    card.Name = Theme:Text(card, isLead and 16 or 14, "head", "text", "CENTER")
+    card.Name:SetPoint("TOP", mask, "BOTTOM", 0, -8)
+    card.Name:SetWidth(w - 16)
+
+    card.Spec = Theme:Text(card, 11, "body", "muted", "CENTER")
+    card.Spec:SetPoint("TOP", card.Name, "BOTTOM", 0, -3)
+    card.Spec:SetWidth(w - 16)
+
+    card.Hero = Theme:Text(card, 10, "body", "muted", "CENTER")
+    card.Hero:SetPoint("TOP", card.Spec, "BOTTOM", 0, -2)
+    card.Hero:SetWidth(w - 16)
+    card.Hero:SetHeight(12)
+
+    card.Score = Theme:Text(card, isLead and 34 or 26, "head", "text", "RIGHT")
+    card.Score:SetPoint("TOPRIGHT", card.Hero, "BOTTOM", 4, -6)
+    card.ScoreLabel = Theme:Text(card, 11, "body", "muted")
+    card.ScoreLabel:SetPoint("BOTTOMLEFT", card.Score, "BOTTOMRIGHT", 5, 4)
+    card.ScoreLabel:SetText("score")
+
+    card.Why = Theme:Text(card, 11, "body", "gold", "CENTER")
+    card.Why:SetPoint("TOP", card.Score, "BOTTOM", 18, -4)
+    card.Why:SetWidth(w - 16)
+
+    -- Actions (bottom): 1-5 star rating for this run, then add friend
+    local maxStars = MPT.Database.RATING_MAX_STARS
+    card.StarRow = CreateFrame("Frame", nil, card)
+    card.StarRow:SetSize(maxStars * STAR_SIZE + (maxStars - 1) * STAR_GAP, STAR_SIZE)
+    card.StarRow:SetPoint("BOTTOMLEFT", card, "BOTTOMLEFT", 10, 10)
+    card.Stars = {}
+    for i = 1, maxStars do
+        local star = CreateFrame("Button", nil, card.StarRow)
+        star:SetSize(STAR_SIZE, STAR_SIZE)
+        star:SetPoint("LEFT", card.StarRow, "LEFT", (i - 1) * (STAR_SIZE + STAR_GAP), 0)
+        star.Icon = star:CreateTexture(nil, "ARTWORK")
+        star.Icon:SetAllPoints(star)
+        star.Icon:SetTexture(Theme.TEX_STAR)
+        star.value = i
+        card.Stars[i] = star
+    end
+    card.FriendBtn = Theme:Button(card, "Friend", FRIEND_BTN_W, 22, "ghost")
+    card.FriendBtn:SetPoint("BOTTOMRIGHT", card, "BOTTOMRIGHT", -8, 8)
+    card.YouText = Theme:Text(card, 11, "body", "muted", "CENTER")
+    card.YouText:SetPoint("BOTTOM", card, "BOTTOM", 0, 14)
+    card.YouText:SetText("You")
+
+    -- Stats block sits above the actions
+    card.StatsBlock = CreateFrame("Frame", nil, card)
+    card.StatsBlock:SetPoint("BOTTOMLEFT", card, "BOTTOMLEFT", 12, 38)
+    card.StatsBlock:SetPoint("BOTTOMRIGHT", card, "BOTTOMRIGHT", -12, 38)
+    card.StatsBlock:SetHeight(174)
+
+    local y = 0
+    card.dps, card.DPSBar, y = AddCardStat(card, "DPS", true, y)
+    card.hps, card.HPSBar, y = AddCardStat(card, "HPS", true, y)
+    card.interrupts, card.IntBar, y = AddCardStat(card, "Interrupts", true, y)
+    card.dispels, card.DispBar, y = AddCardStat(card, "Dispels", true, y)
+    card.avoidable, card.AvoidBar, y = AddCardStat(card, "Avoidable dmg", true, y)
+    card.deaths, _, y = AddCardStat(card, "Deaths", false, y)
+    card.AvoidBar:SetColor(MPT.Theme:Unpack("bad"))
+    card.StatsBlock:SetHeight(y)
+
+    return card
+end
+
+local function CreateReportMenu(frame, reportButton)
+    local Theme = T()
+    local menu = CreateFrame("Frame", nil, frame)
+    menu:SetSize(150, 84)
+    menu:SetPoint("BOTTOMLEFT", reportButton, "TOPLEFT", 0, 6)
+    menu:SetFrameLevel(frame:GetFrameLevel() + 50)
+    menu:EnableMouse(true)
+    Theme:Panel(menu, "surface", "line")
+    menu:Hide()
+
+    local title = Theme:Text(menu, 11, "body", "muted", "CENTER")
+    title:SetPoint("TOP", menu, "TOP", 0, -8)
+    title:SetText("Report run")
+
+    local mvpBtn = Theme:Button(menu, "MVP report", 130, 22)
+    mvpBtn:SetPoint("TOP", title, "BOTTOM", 0, -6)
+    local summaryBtn = Theme:Button(menu, "Summary report", 130, 22)
+    summaryBtn:SetPoint("TOP", mvpBtn, "BOTTOM", 0, -4)
+
+    local partyBtn = Theme:Button(menu, "Party", 130, 22)
+    partyBtn:SetPoint("TOP", title, "BOTTOM", 0, -6)
+    local guildBtn = Theme:Button(menu, "Guild", 130, 22)
+    guildBtn:SetPoint("TOP", partyBtn, "BOTTOM", 0, -4)
+    local backBtn = Theme:Button(menu, "Back", 130, 22, "ghost")
+    backBtn:SetPoint("TOP", guildBtn, "BOTTOM", 0, -4)
+
+    local mode = "summary"
+    local function ShowModeScreen()
+        menu:SetHeight(84)
+        title:SetText("Report run")
+        mvpBtn:Show(); summaryBtn:Show()
+        partyBtn:Hide(); guildBtn:Hide(); backBtn:Hide()
+    end
+    local function ShowChannelScreen(newMode)
+        mode = newMode
+        menu:SetHeight(110)
+        title:SetText(newMode == "summary" and "MVP report to..." or "Summary report to...")
+        mvpBtn:Hide(); summaryBtn:Hide()
+        partyBtn:Show(); guildBtn:Show(); backBtn:Show()
+        partyBtn:SetEnabled(IsInGroup() and not IsInRaid())
+        guildBtn:SetEnabled(IsInGuild())
+    end
+
+    -- "summary" mode is the MVP-highlights report; "full" is one line per player.
+    mvpBtn:SetScript("OnClick", function() ShowChannelScreen("summary") end)
+    summaryBtn:SetScript("OnClick", function() ShowChannelScreen("full") end)
+    partyBtn:SetScript("OnClick", function()
+        MPT.Scoreboard:ReportRunToChat("PARTY", mode)
+        menu:Hide(); ShowModeScreen()
+    end)
+    guildBtn:SetScript("OnClick", function()
+        MPT.Scoreboard:ReportRunToChat("GUILD", mode)
+        menu:Hide(); ShowModeScreen()
+    end)
+    backBtn:SetScript("OnClick", ShowModeScreen)
+
+    reportButton:SetScript("OnClick", function()
+        if menu:IsShown() then
+            menu:Hide()
+        else
+            ShowModeScreen()
+            menu:Show()
+        end
+    end)
+    return menu
 end
 
 function Scoreboard:Create()
     if self.frame then
-        self.frame:Show()
         return self.frame
     end
-    
-    -- Main frame - wider for better layout
-    local frame = CreateFrame("Frame", "StormsDungeonDataScoreboard", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(1120, 500)
-    frame:SetPoint("CENTER", UIParent, "CENTER")
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    frame:SetFrameStrata("TOOLTIP")
-    frame:SetFrameLevel(1000)
+    local Theme = T()
+
+    local frame = Theme:Window("StormsDungeonDataScoreboard", WINDOW_W, WINDOW_H, "", "FULLSCREEN_DIALOG")
+    frame:SetFrameLevel(100)
     frame:SetScale(MPT.UIUtils:ComputeWindowScale())
+    frame:Hide()
 
-    frame.TitleBg:SetHeight(30)
-    frame.InsetBg:SetAlpha(0.35)
-    
-    -- Title
-    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", frame.TitleBg, "TOPLEFT", 10, -5)
-    title:SetText("Run Complete")
-    frame.Title = title
+    -- Header: eyebrow, dungeon name, key chip, time, result, rating gain
+    local eyebrow = Theme:Text(frame, 11, "body", "muted")
+    eyebrow:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, -14)
+    frame.Eyebrow = eyebrow
 
-    -- Close button: BasicFrameTemplateWithInset already provides one; only create if missing.
-    if not frame.CloseButton and not frame.closeButton then
-        local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-        closeBtn:SetPoint("TOPRIGHT", frame.TitleBg, "TOPRIGHT", -5, -5)
-    end
-    
-    -- Dungeon info section - improved layout
-    local dungeonInfoBg = CreateFrame("Frame", nil, frame)
-    dungeonInfoBg:SetSize(1100, 90)
-    dungeonInfoBg:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, -45)
-    
-    local backdropInfo = {
-        bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-        tile = true, tileSize = 16, edgeSize = 16,
-        insets = {left = 2, right = 2, top = 2, bottom = 2}
-    }
-    SetBackdropCompat(dungeonInfoBg, backdropInfo, {0.1, 0.1, 0.1, 0.5}, {1, 1, 1, 0.3})
-    
-    -- Dungeon name - Line 1
-    local dungeonName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    dungeonName:SetPoint("TOPLEFT", dungeonInfoBg, "TOPLEFT", 25, -10)
-    dungeonName:SetJustifyH("LEFT")
-    frame.DungeonName = dungeonName
-    
-    -- Line 2: Keystone level and Duration (same line)
-    local keystoneLevel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    keystoneLevel:SetPoint("TOPLEFT", dungeonName, "BOTTOMLEFT", 0, -6)
-    keystoneLevel:SetJustifyH("LEFT")
-    frame.KeystoneLevel = keystoneLevel
-
-    local duration = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    duration:SetPoint("LEFT", keystoneLevel, "RIGHT", 10, 0)
-    duration:SetJustifyH("LEFT")
-    frame.Duration = duration
-
-    -- Line 3: Spec and Hero (same line, under keystone/duration)
-    local specIconFrame = CreateFrame("Frame", nil, frame)
-    specIconFrame:SetSize(24, 24)
-    specIconFrame:SetPoint("TOPLEFT", keystoneLevel, "BOTTOMLEFT", 0, -8)
-
-    local specIconText = specIconFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    specIconText:SetPoint("CENTER", specIconFrame, "CENTER", 0, 0)
-    specIconText:SetJustifyH("CENTER")
+    local specIconText = Theme:Text(frame, 11, "body", "muted")
+    specIconText:SetPoint("LEFT", eyebrow, "RIGHT", 8, 0)
     frame.SpecIconText = specIconText
-
-    local heroIconFrame = CreateFrame("Frame", nil, frame)
-    heroIconFrame:SetSize(80, 24)
-    heroIconFrame:SetPoint("LEFT", specIconFrame, "RIGHT", 8, 0)
-
-    local heroIconText = heroIconFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    heroIconText:SetPoint("CENTER", heroIconFrame, "CENTER", 0, 0)
-    heroIconText:SetJustifyH("CENTER")
-    heroIconText:SetTextColor(0.8, 0.8, 1, 1)  -- Light blue tint
+    local heroIconText = Theme:Text(frame, 11, "body", "muted")
+    heroIconText:SetPoint("LEFT", specIconText, "RIGHT", 4, 0)
     frame.HeroIconText = heroIconText
-    
-    -- Player stats table header (Rank first per user request)
-    local headerY = -175
-    local headers = {"Rank", "Player", "Damage", "DPS", "Healing", "HPS", "Interrupts", "Dispels", "Deaths", "Avoidable"}
-    local columnWidths = {64, 270, 120, 90, 120, 90, 80, 75, 70, 100}  -- Rank first, then Player, then stats
-    local playerNameWidth = 168  -- Room for name; buttons start after this (roleIcon 16 + gap 4 + this + 2 + 22+2+22+2+54 = 268)
-    local headerX = 10
-    
-    -- Create header background
-    local headerBg = frame:CreateTexture(nil, "BACKGROUND")
-    headerBg:SetHeight(18)
-    headerBg:SetWidth(1100)
-    headerBg:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, headerY - 2)
-    headerBg:SetColorTexture(0.12, 0.12, 0.18, 0.45)
-    
-    for i, header in ipairs(headers) do
-        local headerText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        headerText:SetText(header)
-        headerText:SetPoint("TOPLEFT", frame, "TOPLEFT", headerX, headerY)
-        headerText:SetTextColor(1, 0.84, 0, 1)
-        headerText:SetWidth(columnWidths[i])
-        if i == 2 then
-            headerText:SetJustifyH("LEFT")
-        else
-            headerText:SetJustifyH("CENTER")
-        end
-        headerX = headerX + columnWidths[i]
-    end
-    
-    -- Player stats rows
+
+    frame.Title:ClearAllPoints()
+    frame.Title:SetPoint("TOPLEFT", eyebrow, "BOTTOMLEFT", 0, -4)
+    Theme:SetFont(frame.Title, 22, "head")
+    frame.DungeonName = frame.Title
+
+    local keyChip = CreateFrame("Frame", nil, frame)
+    keyChip:SetSize(44, 22)
+    keyChip:SetPoint("LEFT", frame.Title, "RIGHT", 12, 0)
+    Theme:Panel(keyChip, "raised", "line")
+    frame.KeystoneLevel = Theme:Text(keyChip, 14, "head", "text", "CENTER")
+    frame.KeystoneLevel:SetPoint("CENTER", keyChip, "CENTER", 0, 0)
+    frame.KeyChip = keyChip
+
+    frame.Duration = Theme:Text(frame, 13, "body", "muted")
+    frame.Duration:SetPoint("LEFT", keyChip, "RIGHT", 12, 0)
+    frame.Result = Theme:Text(frame, 13, "body", "good")
+    frame.Result:SetPoint("LEFT", frame.Duration, "RIGHT", 8, 0)
+
+    frame.RatingGain = Theme:Text(frame, 16, "head", "good", "RIGHT")
+    frame.RatingGain:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -44, -26)
+
+    -- Timer bar: duration against the dungeon's limit
+    frame.TimerBar = Theme:Bar(frame, 3)
+    frame.TimerBar:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, -66)
+    frame.TimerBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -20, -66)
+
+    -- Cards
+    local cardsArea = CreateFrame("Frame", nil, frame)
+    cardsArea:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 20, CARDS_BOTTOM)
+    cardsArea:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -20, -80)
+    frame.CardsArea = cardsArea
+
     frame.PlayerRows = {}
-    frame.ColumnWidths = columnWidths
-    
+    local x = 0
     for i = 1, 5 do
-        local rowY = -205 - ((i - 1) * 28)
-        
-        local row = CreateFrame("Frame", nil, frame)
-        row:SetSize(1100, 24)
-        row:SetPoint("TOPLEFT", frame, "TOPLEFT", 10, rowY)
-
-        local hover = row:CreateTexture(nil, "HIGHLIGHT")
-        hover:SetAllPoints(row)
-        hover:SetTexture("Interface/QuestFrame/UI-QuestTitleHighlight")
-        hover:SetBlendMode("ADD")
-        hover:SetAlpha(0.14)
-        
-        -- Alternating row backgrounds
-        if i % 2 == 0 then
-            local rowBg = row:CreateTexture(nil, "BACKGROUND")
-            rowBg:SetAllPoints(row)
-            rowBg:SetColorTexture(0.1, 0.1, 0.1, 0.2)
-        end
-
-        local mvpBg = row:CreateTexture(nil, "BORDER")
-        mvpBg:SetAllPoints(row)
-        mvpBg:SetColorTexture(1, 0.84, 0, 0.12)
-        mvpBg:Hide()
-        
-        local roleIconSize = 16
-        local roleIconGap = 4
-        local roleIcon = row:CreateTexture(nil, "OVERLAY")
-        roleIcon:SetSize(roleIconSize, roleIconSize)
-        roleIcon:SetPoint("LEFT", row, "LEFT", columnWidths[1], 0)
-        roleIcon:Hide()
-        -- Text fallback (T/H/D) when Blizzard role texture doesn't load
-        local roleLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        roleLabel:SetPoint("LEFT", row, "LEFT", columnWidths[1], 0)
-        roleLabel:SetSize(roleIconSize, roleIconSize)
-        roleLabel:SetJustifyH("CENTER")
-        roleLabel:SetJustifyV("MIDDLE")
-        roleLabel:SetFont(roleLabel:GetFont(), 11, "OUTLINE")
-        roleLabel:Hide()
-        
-        local playerName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        playerName:SetPoint("LEFT", row, "LEFT", columnWidths[1] + roleIconSize + roleIconGap, 0)
-        playerName:SetWidth(playerNameWidth)
-        playerName:SetJustifyH("LEFT")
-        
-        -- Thumbs up (good) and thumbs down (bad) for non-user players
-        -- Positioned right after player name, before damage column
-        local ratingUpBtn = CreateFrame("Button", nil, row, "GameMenuButtonTemplate")
-        ratingUpBtn:SetSize(22, 20)
-        ratingUpBtn:SetPoint("LEFT", row, "LEFT", columnWidths[1] + roleIconSize + roleIconGap + playerNameWidth + 4, 0)
-        ratingUpBtn:SetText("|cff00ff00+|r")
-        ratingUpBtn:SetScript("OnClick", function() end)  -- Set per-row in Show()
-        ratingUpBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Rate good") end)
-        ratingUpBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        ratingUpBtn:Hide()
-        
-        local ratingDownBtn = CreateFrame("Button", nil, row, "GameMenuButtonTemplate")
-        ratingDownBtn:SetSize(22, 20)
-        ratingDownBtn:SetPoint("LEFT", ratingUpBtn, "RIGHT", 2, 0)
-        ratingDownBtn:SetText("|cffff4444-|r")
-        ratingDownBtn:SetScript("OnClick", function() end)
-        ratingDownBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Rate bad") end)
-        ratingDownBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        ratingDownBtn:Hide()
-        
-        -- Add Friend button (for non-user players)
-        local addFriendBtn = CreateFrame("Button", nil, row, "GameMenuButtonTemplate")
-        addFriendBtn:SetSize(54, 20)
-        addFriendBtn:SetPoint("LEFT", ratingDownBtn, "RIGHT", 2, 0)
-        addFriendBtn:SetText("Friend")
-        addFriendBtn:SetScript("OnClick", function() end)
-        addFriendBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Add to friend list") end)
-        addFriendBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        addFriendBtn:Hide()
-        
-        local score = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        score:SetPoint("LEFT", row, "LEFT", 0, 0)
-        score:SetWidth(columnWidths[1])
-        score:SetJustifyH("CENTER")
-
-        local damage = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        damage:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2], 0)
-        damage:SetWidth(columnWidths[3])
-        damage:SetJustifyH("CENTER")
-        
-        local dps = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dps:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3], 0)
-        dps:SetWidth(columnWidths[4])
-        dps:SetJustifyH("CENTER")
-        
-        local healing = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        healing:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3] + columnWidths[4], 0)
-        healing:SetWidth(columnWidths[5])
-        healing:SetJustifyH("CENTER")
-        
-        local hps = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        hps:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3] + columnWidths[4] + columnWidths[5], 0)
-        hps:SetWidth(columnWidths[6])
-        hps:SetJustifyH("CENTER")
-        
-        local interrupts = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        interrupts:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3] + columnWidths[4] + columnWidths[5] + columnWidths[6], 0)
-        interrupts:SetWidth(columnWidths[7])
-        interrupts:SetJustifyH("CENTER")
-        
-        local dispels = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        dispels:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3] + columnWidths[4] + columnWidths[5] + columnWidths[6] + columnWidths[7], 0)
-        dispels:SetWidth(columnWidths[8])
-        dispels:SetJustifyH("CENTER")
-        
-        local deaths = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        deaths:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3] + columnWidths[4] + columnWidths[5] + columnWidths[6] + columnWidths[7] + columnWidths[8], 0)
-        deaths:SetWidth(columnWidths[9])
-        deaths:SetJustifyH("CENTER")
-        
-        local avoidable = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        avoidable:SetPoint("LEFT", row, "LEFT", columnWidths[1] + columnWidths[2] + columnWidths[3] + columnWidths[4] + columnWidths[5] + columnWidths[6] + columnWidths[7] + columnWidths[8] + columnWidths[9], 0)
-        avoidable:SetWidth(columnWidths[10])
-        avoidable:SetJustifyH("CENTER")
-        
-        table.insert(frame.PlayerRows, {
-            frame = row,
-            mvpBg = mvpBg,
-            roleIcon = roleIcon,
-            roleLabel = roleLabel,
-            name = playerName,
-            score = score,
-            damage = damage,
-            dps = dps,
-            healing = healing,
-            hps = hps,
-            interrupts = interrupts,
-            dispels = dispels,
-            deaths = deaths,
-            avoidable = avoidable,
-            ratingUpBtn = ratingUpBtn,
-            ratingDownBtn = ratingDownBtn,
-            addFriendBtn = addFriendBtn,
-        })
+        local card = CreateCard(cardsArea, i)
+        card.anchorX = x
+        card:SetPoint("BOTTOMLEFT", cardsArea, "BOTTOMLEFT", x, 0)
+        x = x + card:GetWidth() + CARD_GAP
+        card.frame = card
+        frame.PlayerRows[i] = card
     end
 
-    -- Footer: Totals + MVP
-    local footerBg = CreateFrame("Frame", nil, frame)
-    footerBg:SetSize(980, 80)
-    footerBg:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 10, 50)
-    SetBackdropCompat(footerBg, backdropInfo, {0.08, 0.08, 0.08, 0.45}, {1, 1, 1, 0.25})
-
-    local totalsTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    totalsTitle:SetPoint("TOPLEFT", footerBg, "TOPLEFT", 12, -10)
-    totalsTitle:SetTextColor(1, 0.84, 0, 1)
-    totalsTitle:SetText("Totals")
-
-    local totalsText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    totalsText:SetPoint("TOPLEFT", footerBg, "TOPLEFT", 12, -28)
-    totalsText:SetText("Damage: --   DPS: --   Healing: --   HPS: --   Interrupts: --   Deaths: --")
-    frame.TotalsText = totalsText
-
-    local mvpTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    mvpTitle:SetPoint("TOP", dungeonInfoBg, "TOP", 300, -10)
-    mvpTitle:SetTextColor(1, 0.84, 0, 1)
-    mvpTitle:SetText("MVP")
-    mvpTitle:SetJustifyH("CENTER")
-
-    local mvpName = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
-    mvpName:SetPoint("TOP", mvpTitle, "BOTTOM", 0, -8)
-    mvpName:SetText("--")
-    mvpName:SetJustifyH("CENTER")
-    frame.MVPName = mvpName
-
-    local mvpDetails = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    mvpDetails:SetPoint("TOP", mvpName, "BOTTOM", 0, -4)
-    mvpDetails:SetText("--")
-    mvpDetails:SetJustifyH("CENTER")
-    frame.MVPDetails = mvpDetails
-    
-    -- Buttons at bottom: Previous run | Run X of Y | Next run ... History
-    local buttonWidth = 100
-    local buttonHeight = 24
-    local buttonSpacing = 12  -- Increased spacing between buttons
-    
-    local prevButton = MPT.UIUtils:CreateButton(frame, "Previous", buttonWidth, buttonHeight, function()
-        if MPT.Scoreboard.runList and MPT.Scoreboard.currentRunIndex and MPT.Scoreboard.currentRunIndex < #MPT.Scoreboard.runList then
-            local nextIdx = MPT.Scoreboard.currentRunIndex + 1
-            MPT.Scoreboard:Show(MPT.Scoreboard.runList[nextIdx])
+    -- Footer
+    frame.PrevButton = Theme:Button(frame, "<", 28, 24, "default", function()
+        if Scoreboard.runList and Scoreboard.currentRunIndex and Scoreboard.currentRunIndex < #Scoreboard.runList then
+            Scoreboard:Show(Scoreboard.runList[Scoreboard.currentRunIndex + 1])
         end
     end)
-    prevButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 15, 15)
-    frame.PrevButton = prevButton
-    
-    local runNavLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    runNavLabel:SetPoint("LEFT", prevButton, "RIGHT", buttonSpacing, 0)
-    runNavLabel:SetTextColor(0.9, 0.9, 0.9, 1)
-    runNavLabel:SetText("")
-    frame.RunNavLabel = runNavLabel
-    
-    local nextButton = MPT.UIUtils:CreateButton(frame, "Next", buttonWidth, buttonHeight, function()
-        if MPT.Scoreboard.runList and MPT.Scoreboard.currentRunIndex and MPT.Scoreboard.currentRunIndex > 1 then
-            local nextIdx = MPT.Scoreboard.currentRunIndex - 1
-            MPT.Scoreboard:Show(MPT.Scoreboard.runList[nextIdx])
+    frame.PrevButton:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 20, 20)
+    frame.PrevButton:SetScript("OnEnter", function(b) GameTooltip:SetOwner(b, "ANCHOR_TOP"); GameTooltip:SetText("Older run"); GameTooltip:Show() end)
+    frame.PrevButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    frame.RunNavLabel = Theme:Text(frame, 12, "body", "muted", "CENTER")
+    frame.RunNavLabel:SetPoint("LEFT", frame.PrevButton, "RIGHT", 8, 0)
+    frame.RunNavLabel:SetWidth(96)
+
+    frame.NextButton = Theme:Button(frame, ">", 28, 24, "default", function()
+        if Scoreboard.runList and Scoreboard.currentRunIndex and Scoreboard.currentRunIndex > 1 then
+            Scoreboard:Show(Scoreboard.runList[Scoreboard.currentRunIndex - 1])
         end
     end)
-    nextButton:SetPoint("LEFT", runNavLabel, "RIGHT", buttonSpacing, 0)
-    frame.NextButton = nextButton
-    
-    local reportButton = MPT.UIUtils:CreateButton(frame, "Report", buttonWidth, buttonHeight, function() end)
-    reportButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -(15 + buttonWidth + buttonSpacing), 15)
+    frame.NextButton:SetPoint("LEFT", frame.RunNavLabel, "RIGHT", 8, 0)
+    frame.NextButton:SetScript("OnEnter", function(b) GameTooltip:SetOwner(b, "ANCHOR_TOP"); GameTooltip:SetText("Newer run"); GameTooltip:Show() end)
+    frame.NextButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-    -- Custom report menu positioned directly above Report button (avoids Blizzard dropdown going to top-left)
-    local reportMenu = CreateFrame("Frame", nil, frame)
-    reportMenu:SetSize(150, 80)
-    reportMenu:SetPoint("BOTTOMLEFT", reportButton, "TOPLEFT", 0, 2)
-    reportMenu:SetFrameStrata("TOOLTIP")
-    reportMenu:SetFrameLevel(frame:GetFrameLevel() + 50)
-    local menuBackdrop = {
-        bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-        edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-        tile = true, tileSize = 16, edgeSize = 16,
-        insets = {left = 2, right = 2, top = 2, bottom = 2}
-    }
-    SetBackdropCompat(reportMenu, menuBackdrop, {0.15, 0.15, 0.15, 0.95}, {1, 1, 1, 0.4})
-    reportMenu:Hide()
-    frame.ReportMenuFrame = reportMenu
+    frame.TotalsText = Theme:Text(frame, 11, "body", "muted")
+    frame.TotalsText:SetPoint("LEFT", frame.NextButton, "RIGHT", 16, 0)
+    frame.TotalsText:SetWidth(420)
 
-    local menuTitle = reportMenu:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    menuTitle:SetPoint("TOP", reportMenu, "TOP", 0, -8)
-    menuTitle:SetTextColor(1, 0.84, 0, 1)
-    menuTitle:SetText("Report Run")
-
-    -- Screen 1: mode selection (MVP Report / Summary Report)
-    local mvpReportBtn = MPT.UIUtils:CreateButton(reportMenu, "MVP Report", 130, 22, function() end)
-    mvpReportBtn:SetPoint("TOP", menuTitle, "BOTTOM", 0, -6)
-
-    local summaryReportBtn = MPT.UIUtils:CreateButton(reportMenu, "Summary Report", 130, 22, function() end)
-    summaryReportBtn:SetPoint("TOP", mvpReportBtn, "BOTTOM", 0, -4)
-
-    -- Screen 2: channel selection (Party / Guild / Back)
-    local channelLabel = reportMenu:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    channelLabel:SetPoint("TOP", menuTitle, "BOTTOM", 0, -6)
-    channelLabel:SetTextColor(0.8, 0.8, 1, 1)
-    channelLabel:SetText("")
-    channelLabel:Hide()
-
-    local partyBtn = MPT.UIUtils:CreateButton(reportMenu, "Party", 130, 22, function() end)
-    partyBtn:SetPoint("TOP", channelLabel, "BOTTOM", 0, -4)
-    partyBtn:Hide()
-
-    local guildBtn = MPT.UIUtils:CreateButton(reportMenu, "Guild", 130, 22, function() end)
-    guildBtn:SetPoint("TOP", partyBtn, "BOTTOM", 0, -4)
-    guildBtn:Hide()
-
-    local backBtn = MPT.UIUtils:CreateButton(reportMenu, "< Back", 130, 22, function() end)
-    backBtn:SetPoint("TOP", guildBtn, "BOTTOM", 0, -4)
-    backBtn:Hide()
-
-    -- Helpers to switch between the two screens
-    local reportMenuMode = "none"
-
-    local function showModeScreen()
-        reportMenu:SetSize(150, 80)
-        mvpReportBtn:Show()
-        summaryReportBtn:Show()
-        channelLabel:Hide()
-        partyBtn:Hide()
-        guildBtn:Hide()
-        backBtn:Hide()
-    end
-
-    local function showChannelScreen(mode)
-        reportMenuMode = mode
-        channelLabel:SetText(mode == "summary" and "MVP Report" or "Summary Report")
-        reportMenu:SetSize(150, 120)
-        mvpReportBtn:Hide()
-        summaryReportBtn:Hide()
-        channelLabel:Show()
-        partyBtn:Show()
-        partyBtn:SetEnabled(IsInGroup() and not IsInRaid())
-        guildBtn:Show()
-        guildBtn:SetEnabled(IsInGuild())
-        backBtn:Show()
-    end
-
-    mvpReportBtn:SetScript("OnClick", function() showChannelScreen("summary") end)
-    summaryReportBtn:SetScript("OnClick", function() showChannelScreen("full") end)
-
-    partyBtn:SetScript("OnClick", function()
-        MPT.Scoreboard:ReportRunToChat("PARTY", reportMenuMode)
-        reportMenu:Hide()
-        showModeScreen()
-    end)
-
-    guildBtn:SetScript("OnClick", function()
-        MPT.Scoreboard:ReportRunToChat("GUILD", reportMenuMode)
-        reportMenu:Hide()
-        showModeScreen()
-    end)
-
-    backBtn:SetScript("OnClick", function() showModeScreen() end)
-
-    reportButton:SetScript("OnClick", function()
-        if reportMenu:IsShown() then
-            reportMenu:Hide()
-            showModeScreen()
-        else
-            showModeScreen()
-            reportMenu:Show()
-        end
-    end)
-
-    local historyButton = MPT.UIUtils:CreateButton(frame, "History", buttonWidth, buttonHeight, function()
+    local historyButton = Theme:Button(frame, "History", 90, 24, "primary", function()
         frame:Hide()
         if MPT.HistoryViewer then
             MPT.HistoryViewer:Show()
         end
     end)
-    historyButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -15, 15)
+    historyButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -20, 20)
 
-    -- Auto-report checkbox
-    local autoReportCheck = CreateFrame("CheckButton", "StormsDungeonDataAutoReportCheck", frame, "UICheckButtonTemplate")
-    autoReportCheck:SetSize(24, 24)
-    autoReportCheck:SetPoint("RIGHT", reportButton, "LEFT", -8, 0)
-    autoReportCheck.text:ClearAllPoints()
-    autoReportCheck.text:SetPoint("RIGHT", autoReportCheck, "LEFT", -2, 0)
-    autoReportCheck.text:SetJustifyH("RIGHT")
-    autoReportCheck.text:SetText("Auto-report to party")
-    autoReportCheck.text:SetTextColor(0.9, 0.9, 0.9, 1)
+    local reportButton = Theme:Button(frame, "Report", 90, 24)
+    reportButton:SetPoint("RIGHT", historyButton, "LEFT", -8, 0)
+    frame.ReportMenuFrame = CreateReportMenu(frame, reportButton)
 
-    local function GetAutoReportSetting()
-        if StormsDungeonDataDB and StormsDungeonDataDB.settings then
-            return StormsDungeonDataDB.settings.autoReportToParty == true
-        end
-        return false
-    end
+    local autoReport = Theme:Toggle(frame, "Auto-report to party",
+        function() return Theme:GetSetting("autoReportToParty", false) == true end,
+        function(v) Theme:SetSetting("autoReportToParty", v) end,
+        "Post the MVP summary to party chat when a key ends. Only one SDD user in the group posts.")
+    autoReport:SetWidth(160)
+    autoReport:SetPoint("RIGHT", reportButton, "LEFT", -16, 0)
+    frame.AutoReportCheck = autoReport
 
-    autoReportCheck:SetChecked(GetAutoReportSetting())
-    autoReportCheck:SetScript("OnClick", function(self)
-        local checked = self:GetChecked()
-        if StormsDungeonDataDB then
-            StormsDungeonDataDB.settings = StormsDungeonDataDB.settings or {}
-            StormsDungeonDataDB.settings.autoReportToParty = checked
-        end
+    frame:HookScript("OnHide", function()
+        if frame.ReportMenuFrame then frame.ReportMenuFrame:Hide() end
     end)
-    frame.AutoReportCheck = autoReportCheck
 
     self.frame = frame
     return frame
@@ -1317,683 +1186,587 @@ function Scoreboard:GetRunListAndIndex(runRecord)
     return list, nil
 end
 
-function Scoreboard:Show(runRecord)
-    if not runRecord then
-        print("|cff00ffaa[StormsDungeonData]|r No run record provided")
-        return
-    end
-    
-    local frame = self:Create()
-    local runList, idx = self:GetRunListAndIndex(runRecord)
-    self.runList = runList
-    self.currentRunIndex = idx or 1
-    
-    -- Populate run info
-    frame.DungeonName:SetText(runRecord.dungeonName)
-    frame.KeystoneLevel:SetText(string.format("Level: %d", runRecord.keystoneLevel))
+local function ShortNameForCard(name)
+    return (type(name) == "string" and name:match("^([^%-]+)")) or name or "Unknown"
+end
 
-    if not runRecord.specIcon then
-        local spec = GetPlayerSpecInfoSafe()
-        if spec and spec.specIcon then
-            runRecord.specIcon = spec.specIcon
-        end
-    end
-
-    if not runRecord.heroIcon then
-        local hero = GetHeroTalentInfoSafe()
-        if hero and hero.heroIcon and hero.heroIcon ~= 0 then
-            runRecord.heroIcon = hero.heroIcon
-        end
-    end
-
-    if frame.SpecIconText then
-        if runRecord.specIcon and runRecord.specIcon ~= 0 then
-            frame.SpecIconText:SetText("|T" .. tostring(runRecord.specIcon) .. ":16:16:0:0|t")
-        else
-            frame.SpecIconText:SetText("")
-        end
-    end
-
-    if frame.HeroIconText then
-        if runRecord.heroName and runRecord.heroName ~= "" then
-            frame.HeroIconText:SetText(runRecord.heroName)
-        else
-            frame.HeroIconText:SetText("")
-        end
-    end
-
-    local durationSec = tonumber(runRecord.duration) or (runRecord.endTime and runRecord.startTime and (runRecord.endTime - runRecord.startTime)) or 0
-    local minutes = math.floor(durationSec / 60)
-    local seconds = durationSec % 60
-    local durationStr = string.format("%02d:%02d", minutes, seconds)
-    if runRecord.abandonReason == "abandon" then
-        durationStr = durationStr .. " Abandon"
-    end
-    frame.Duration:SetText(durationStr)
-    
-    -- Populate player stats
-    -- Support both real combat format (players array) and test format (playerStats dictionary)
-    local playerData = runRecord.players or {}
-    if not playerData or #playerData == 0 then
-        if runRecord.groupMembers and #runRecord.groupMembers > 0 then
-            playerData = runRecord.groupMembers
-        end
-    end
-    if not playerData or #playerData == 0 then
-        -- Use playerStats dictionary from test mode
-        playerData = {}
-        if runRecord.playerStats then
-            local index = 1
-            for name, stats in pairs(runRecord.playerStats) do
-                playerData[index] = {
-                    name = name,
-                    class = "WARRIOR",  -- Default class for test data
-                    stats = stats
-                }
-                index = index + 1
-            end
-        end
-    end
-    
-    local function GetPersonalBestStats(dungeonID, dungeonName, playerName)
-        local best = {damage = 0, healing = 0, interrupts = 0, dispels = 0}
-        local db = StormsDungeonDataDB
-        if not db or not db.runs then
-            return best
-        end
-
-        -- Get all user's character names
-        local userCharacters = {}
-        if MPT.Database and MPT.Database.GetAllCharacters then
-            local chars = MPT.Database:GetAllCharacters()
-            for _, char in ipairs(chars) do
-                local fullName = char.name .. "-" .. char.realm
-                userCharacters[fullName] = true
-                userCharacters[char.name] = true
-            end
-        end
-
-        for _, run in ipairs(db.runs) do
-            local sameDungeon = false
-            if dungeonID and run.dungeonID and run.dungeonID ~= 0 then
-                sameDungeon = run.dungeonID == dungeonID
-            elseif dungeonName then
-                sameDungeon = run.dungeonName == dungeonName
-            end
-
-            if sameDungeon then
-                if run.playerStats then
-                    for pName, pstats in pairs(run.playerStats) do
-                        -- Check if this player is one of the user's characters
-                        local shortName = pName:match("^([^%-]+)") or pName
-                        if userCharacters[pName] or userCharacters[shortName] then
-                            best.damage = math.max(best.damage, pstats.damage or 0)
-                            best.healing = math.max(best.healing, pstats.healing or 0)
-                            best.interrupts = math.max(best.interrupts, pstats.interrupts or 0)
-                            best.dispels = math.max(best.dispels, pstats.dispels or 0)
-                        end
-                    end
-                elseif run.players then
-                    for _, p in ipairs(run.players) do
-                        local shortName = p.name and (p.name:match("^([^%-]+)") or p.name)
-                        if shortName and (userCharacters[p.name] or userCharacters[shortName]) then
-                            best.damage = math.max(best.damage, p.damage or 0)
-                            best.healing = math.max(best.healing, p.healing or 0)
-                            best.interrupts = math.max(best.interrupts, p.interrupts or 0)
-                            best.dispels = math.max(best.dispels, p.dispels or 0)
-                        end
-                    end
+-- Collects every user character name (full and short) once per Show call.
+local function BuildUserCharacterSet()
+    local set = {}
+    if MPT.Database and MPT.Database.GetAllCharacters then
+        for _, char in ipairs(MPT.Database:GetAllCharacters() or {}) do
+            if char.name then
+                set[char.name] = true
+                set[char.name:match("^([^%-]+)") or char.name] = true
+                if char.realm then
+                    set[char.name .. "-" .. char.realm] = true
                 end
             end
         end
+    end
+    return set
+end
 
+local function IsUserName(userSet, name)
+    if type(name) ~= "string" or name == "" then
+        return false
+    end
+    return userSet[name] or userSet[name:match("^([^%-]+)") or name] or false
+end
+
+local function GetPersonalBestStats(runRecord, userSet)
+    local best = {damage = 0, healing = 0, interrupts = 0, dispels = 0}
+    local db = StormsDungeonDataDB
+    if not db or not db.runs then
         return best
     end
-
-    local totalsDamage, totalsHealing, totalsInterrupts, totalsDeaths, totalsAvoidable = 0, 0, 0, 0, 0
-    local mvpIndex = nil
-    local mvpScore = nil
-    local mvpStats = nil
-    local mvpPlayer = nil
-
-    local function SafeShare(value, total)
-        value = tonumber(value) or 0
-        total = tonumber(total) or 0
-        if total <= 0 then
-            return 0
+    local dungeonID, dungeonName = runRecord.dungeonID, runRecord.dungeonName
+    local function Consider(name, s)
+        if IsUserName(userSet, name) then
+            best.damage = math.max(best.damage, s.damage or 0)
+            best.healing = math.max(best.healing, s.healing or 0)
+            best.interrupts = math.max(best.interrupts, s.interrupts or 0)
+            best.dispels = math.max(best.dispels, s.dispels or 0)
         end
-        return value / total
     end
-
-    local mvpCandidates = {}
-
-    local function SafeText(value, fallback)
-        if value == nil then
-            return fallback or ""
+    for _, run in ipairs(db.runs) do
+        local sameDungeon
+        if dungeonID and run.dungeonID and run.dungeonID ~= 0 then
+            sameDungeon = run.dungeonID == dungeonID
+        else
+            sameDungeon = dungeonName and run.dungeonName == dungeonName
         end
-        if type(value) == "string" then
-            return value
-        end
-        return tostring(value)
-    end
-
-    local function NormalizeNameLookupKeys(name)
-        if type(name) ~= "string" then
-            return nil, nil
-        end
-        local normalized = name:gsub("%s+", "")
-        if normalized == "" then
-            return nil, nil
-        end
-        local fullKey = normalized:lower()
-        local shortKey = (normalized:match("^([^%-]+)") or normalized):lower()
-        return fullKey, shortKey
-    end
-
-    local function ResolvePlayerScoreDelta(player, stats, fallbackName, isUserCharacter)
-        local delta = tonumber((player and player.scoreDelta) or (stats and stats.scoreDelta))
-        if (not delta or delta == 0) and runRecord and type(runRecord.playerScoreDeltas) == "table" then
-            local nameCandidates = {
-                fallbackName,
-                player and player.name,
-                player and player.unitID,
-                stats and stats.name,
-            }
-            for _, candidate in ipairs(nameCandidates) do
-                local fullKey, shortKey = NormalizeNameLookupKeys(candidate)
-                delta = (fullKey and runRecord.playerScoreDeltas[fullKey]) or (shortKey and runRecord.playerScoreDeltas[shortKey])
-                if delta and delta ~= 0 then
-                    break
+        if sameDungeon and not run.deleted then
+            if run.playerStats then
+                for pName, pstats in pairs(run.playerStats) do
+                    Consider(pName, pstats)
+                end
+            elseif run.players then
+                for _, p in ipairs(run.players) do
+                    Consider(p.name, p)
                 end
             end
         end
-        if (not delta or delta == 0) and isUserCharacter and runRecord then
-            local oldScore = tonumber(runRecord.oldDungeonScore)
-            local newScore = tonumber(runRecord.newDungeonScore)
-            if oldScore and newScore then
-                delta = newScore - oldScore
+    end
+    return best
+end
+
+local function NormalizeNameLookupKeys(name)
+    if type(name) ~= "string" then
+        return nil, nil
+    end
+    local normalized = name:gsub("%s+", "")
+    if normalized == "" then
+        return nil, nil
+    end
+    return normalized:lower(), (normalized:match("^([^%-]+)") or normalized):lower()
+end
+
+local function ResolvePlayerScoreDelta(runRecord, player, stats, fallbackName, isUserCharacter)
+    local delta = tonumber((player and player.scoreDelta) or (stats and stats.scoreDelta))
+    if (not delta or delta == 0) and type(runRecord.playerScoreDeltas) == "table" then
+        for _, candidate in ipairs({fallbackName, player and player.name, player and player.unitID, stats and stats.name}) do
+            local fullKey, shortKey = NormalizeNameLookupKeys(candidate)
+            delta = (fullKey and runRecord.playerScoreDeltas[fullKey]) or (shortKey and runRecord.playerScoreDeltas[shortKey])
+            if delta and delta ~= 0 then
+                break
             end
         end
-        if not delta then
-            return nil
-        end
-        local rounded = delta > 0 and math.floor(delta + 0.5) or math.ceil(delta - 0.5)
-        if rounded == 0 then
-            return nil
-        end
-        return rounded
     end
+    if (not delta or delta == 0) and isUserCharacter then
+        local oldScore = tonumber(runRecord.oldDungeonScore)
+        local newScore = tonumber(runRecord.newDungeonScore)
+        if oldScore and newScore then
+            delta = newScore - oldScore
+        end
+    end
+    if not delta then
+        return nil
+    end
+    local rounded = delta > 0 and math.floor(delta + 0.5) or math.ceil(delta - 0.5)
+    if rounded == 0 then
+        return nil
+    end
+    return rounded
+end
 
-    local function FormatScoreDeltaTag(delta)
-        if not delta then
-            return nil
+local function FormatScoreDeltaTag(delta)
+    if not delta then
+        return nil
+    end
+    if delta > 0 then
+        return MPT.Theme:Colorize("+" .. tostring(delta), "good")
+    end
+    return MPT.Theme:Colorize(tostring(delta), "bad")
+end
+
+local function ResolveDisplayName(player, stats)
+    if type(player.name) == "string" and player.name ~= "" then
+        return player.name
+    elseif type(player.unitID) == "string" and player.unitID ~= "" then
+        return player.unitID
+    elseif type(stats.name) == "string" and stats.name ~= "" then
+        return stats.name
+    end
+    return "Unknown"
+end
+
+-- Turns a run record into ordered card entries (MVP first) plus group totals.
+local function BuildCandidates(runRecord)
+    local playerData = runRecord.players or {}
+    if #playerData == 0 and runRecord.groupMembers and #runRecord.groupMembers > 0 then
+        playerData = runRecord.groupMembers
+    end
+    if #playerData == 0 then
+        playerData = {}
+        for name, stats in pairs(runRecord.playerStats or {}) do
+            playerData[#playerData + 1] = {name = name, class = "WARRIOR", stats = stats}
         end
-        if delta > 0 then
-            return "|cff00ff00(+" .. tostring(delta) .. ")|r"
-        end
-        return "|cffff4444(" .. tostring(delta) .. ")|r"
     end
 
     local assignedRole, maxPlayers = AssignRolesFromPlayerData(playerData)
-
-    -- Compute totals and MVP score per player, then sort by score (MVP first)
-    local totalsDamage, totalsHealing, totalsInterrupts, totalsAvoidable = 0, 0, 0, 0
-    local totalsDispels = 0
-    local totalsDPSFromPlayers, totalsHPSFromPlayers = 0, 0
-    local hasAnyStoredDPS, hasAnyStoredHPS = false, false
-    local candidateList = {}
+    local candidates = {}
     for i = 1, maxPlayers do
         local player = playerData[i]
         local stats = player.stats or {}
         if stats.damage == nil and (player.damage ~= nil or player.healing ~= nil or player.interrupts ~= nil) then
             stats = player
         end
-        if (stats.damage == nil) and MPT.CombatLog and MPT.CombatLog.GetPlayerStats and player.name then
+        if stats.damage == nil and MPT.CombatLog and MPT.CombatLog.GetPlayerStats and player.name then
             stats = MPT.CombatLog:GetPlayerStats(player.name) or {}
         end
-        totalsDamage = totalsDamage + (stats.damage or 0)
-        totalsHealing = totalsHealing + (stats.healing or 0)
-        totalsInterrupts = totalsInterrupts + (stats.interrupts or 0)
-        totalsDispels = totalsDispels + (stats.dispels or 0)
-        totalsAvoidable = totalsAvoidable + (stats.avoidableDamageTaken or 0)
-        local role = assignedRole[i] or "DAMAGER"
-        local dmgShare = SafeShare(stats.damage or 0, totalsDamage)
-        local healShare = SafeShare(stats.healing or 0, totalsHealing)
-        local intShare = SafeShare(stats.interrupts or 0, totalsInterrupts)
-        local dispelShare = SafeShare(stats.dispels or 0, totalsDispels)
-        local deaths = stats.deaths or 0
-        local avoidableShare = SafeShare(stats.avoidableDamageTaken or 0, totalsAvoidable)
-        local specID = stats.specID or player.specID
-        local class  = stats.class  or player.class
-        local score = MVPScoreBalancedRoles(role, dmgShare, healShare, intShare, deaths, avoidableShare, specID, class, dispelShare)
-        candidateList[#candidateList + 1] = { player = player, stats = stats, role = role, score = score, specID = specID, class = class }
+        candidates[#candidates + 1] = {
+            player = player,
+            stats = stats,
+            role = assignedRole[i] or "DAMAGER",
+            specID = stats.specID or player.specID,
+            class = stats.class or player.class,
+        }
     end
-    -- Recompute shares and scores with final totals (we summed incrementally above, so totals are correct after loop)
-    totalsDamage = 0
-    totalsHealing = 0
-    totalsInterrupts = 0
-    totalsDispels = 0
-    totalsAvoidable = 0
-    for _, c in ipairs(candidateList) do
-        totalsDamage = totalsDamage + (c.stats.damage or 0)
-        totalsHealing = totalsHealing + (c.stats.healing or 0)
-        totalsInterrupts = totalsInterrupts + (c.stats.interrupts or 0)
-        totalsDispels = totalsDispels + (c.stats.dispels or 0)
-        totalsAvoidable = totalsAvoidable + (c.stats.avoidableDamageTaken or 0)
-    end
-    for _, c in ipairs(candidateList) do
-        c.dmgShare = SafeShare(c.stats.damage or 0, totalsDamage)
-        c.healShare = SafeShare(c.stats.healing or 0, totalsHealing)
-        c.intShare = SafeShare(c.stats.interrupts or 0, totalsInterrupts)
-        c.dispelShare = SafeShare(c.stats.dispels or 0, totalsDispels)
-        c.deaths = c.stats.deaths or 0
-        c.avoidableShare = SafeShare(c.stats.avoidableDamageTaken or 0, totalsAvoidable)
-        c.score = MVPScoreBalancedRoles(c.role, c.dmgShare, c.healShare, c.intShare, c.deaths, c.avoidableShare, c.specID, c.class, c.dispelShare)
-    end
-    table.sort(candidateList, function(a, b) return (a.score or 0) > (b.score or 0) end)
 
-    for i = 1, 5 do
-        local entry = candidateList[i]
-        local row = frame.PlayerRows[i]
-        if not row then break end
-        if not entry then
-            row.name:SetText("")
-            row.damage:SetText("")
-            if row.dps then row.dps:SetText("") end
-            row.healing:SetText("")
-            if row.hps then row.hps:SetText("") end
-            row.interrupts:SetText("")
-            if row.dispels then row.dispels:SetText("") end
-            if row.deaths then row.deaths:SetText("") end
-            if row.avoidable then row.avoidable:SetText("") end
-            if row.score then row.score:SetText("") end
-            if row.roleIcon then row.roleIcon:Hide() end
-            if row.ratingUpBtn then row.ratingUpBtn:Hide() end
-            if row.ratingDownBtn then row.ratingDownBtn:Hide() end
-            if row.addFriendBtn then row.addFriendBtn:Hide() end
-            row.frame:Hide()
+    local totals = {damage = 0, healing = 0, interrupts = 0, dispels = 0, avoidable = 0, deaths = 0}
+    for _, c in ipairs(candidates) do
+        totals.damage = totals.damage + (c.stats.damage or 0)
+        totals.healing = totals.healing + (c.stats.healing or 0)
+        totals.interrupts = totals.interrupts + (c.stats.interrupts or 0)
+        totals.dispels = totals.dispels + (c.stats.dispels or 0)
+        totals.avoidable = totals.avoidable + (c.stats.avoidableDamageTaken or 0)
+        totals.deaths = totals.deaths + (c.stats.deaths or 0)
+    end
+
+    local function Share(v, t)
+        v, t = tonumber(v) or 0, tonumber(t) or 0
+        return t > 0 and (v / t) or 0
+    end
+    for _, c in ipairs(candidates) do
+        local s = c.stats
+        c.score = MVPScoreBalancedRoles(c.role,
+            Share(s.damage, totals.damage), Share(s.healing, totals.healing), Share(s.interrupts, totals.interrupts),
+            s.deaths or 0, Share(s.avoidableDamageTaken, totals.avoidable), c.specID, c.class, Share(s.dispels, totals.dispels))
+    end
+    table.sort(candidates, function(a, b) return (a.score or 0) > (b.score or 0) end)
+    return candidates, totals, #playerData
+end
+
+-- Short reasons the MVP won, e.g. "Top damage · 14 kicks · No deaths".
+local function BuildMVPReasons(candidates)
+    local top = candidates[1]
+    if not top then return "" end
+    local s = top.stats
+    local maxDmg, maxHeal, maxInt, minAvoid = 0, 0, 0, math.huge
+    for _, c in ipairs(candidates) do
+        maxDmg = math.max(maxDmg, c.stats.damage or 0)
+        maxHeal = math.max(maxHeal, c.stats.healing or 0)
+        maxInt = math.max(maxInt, c.stats.interrupts or 0)
+        minAvoid = math.min(minAvoid, c.stats.avoidableDamageTaken or 0)
+    end
+    local reasons = {}
+    if (s.damage or 0) > 0 and (s.damage or 0) >= maxDmg then reasons[#reasons + 1] = "Top damage" end
+    if (s.healing or 0) > 0 and (s.healing or 0) >= maxHeal then reasons[#reasons + 1] = "Top healing" end
+    if (s.interrupts or 0) > 0 then
+        reasons[#reasons + 1] = ((s.interrupts or 0) >= maxInt and "Most kicks" or (tostring(s.interrupts) .. " kicks"))
+    end
+    if (s.deaths or 0) == 0 then reasons[#reasons + 1] = "No deaths" end
+    if #candidates > 1 and (s.avoidableDamageTaken or 0) <= minAvoid then reasons[#reasons + 1] = "Least avoidable" end
+    while #reasons > 3 do table.remove(reasons) end
+    return table.concat(reasons, " · ")
+end
+
+local RATING_WHISPER_WINDOW = 3 * 60 * 60  -- only whisper about runs that finished in the last 3 hours
+
+-- Lights stars 1..lit in gold and dims the rest.
+local function PaintStars(card, lit)
+    local Theme = MPT.Theme
+    for i, star in ipairs(card.Stars) do
+        if i <= lit then
+            star.Icon:SetVertexColor(Theme:Unpack("gold"))
         else
-            local player = entry.player
-            local stats = entry.stats
-            row.frame:Show()
-
-            -- Color player name by class (use text color directly for reliability)
-            local nameText = nil
-            if type(player.name) == "string" and player.name ~= "" then
-                nameText = player.name
-            elseif type(player.unitID) == "string" and player.unitID ~= "" then
-                nameText = player.unitID
-            elseif type(stats.name) == "string" and stats.name ~= "" then
-                nameText = stats.name
-            end
-            local baseNameText = SafeText(nameText, "Unknown")
-            row.name:SetText(baseNameText)
-            do
-                local classToken = player.class
-                local color
-                if classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken] then
-                    color = RAID_CLASS_COLORS[classToken]
-                    row.name:SetTextColor(color.r, color.g, color.b)
-                elseif classToken and MPT.Utils and MPT.Utils.GetClassColor and MPT.UIUtils and MPT.UIUtils.HexToRGB then
-                    local r, g, b = MPT.UIUtils:HexToRGB(MPT.Utils:GetClassColor(classToken))
-                    row.name:SetTextColor(r, g, b)
-                else
-                    row.name:SetTextColor(1, 0.82, 0, 1) -- default WoW-ish gold
-                end
-            end
-            
-            -- Role: use this candidate's role (rows are sorted by MVP score).
-            local role = entry.role or "DAMAGER"
-            if row.roleLabel then
-                row.roleLabel:Hide()
-            end
-            if row.roleIcon then
-                local useAtlas = false
-                if C_Texture and C_Texture.GetAtlasInfo then
-                    local roleKey = (role == "TANK" and "tank") or (role == "HEALER" and "healer") or "damager"
-                    local candidates = {
-                        "roleicon-" .. roleKey,
-                        "RoleIcon-" .. roleKey:gsub("^%l", string.upper),
-                        "groupfinder-icon-role-" .. roleKey,
-                        "LFG-RoleIcon-" .. roleKey:gsub("^%l", string.upper),
-                    }
-                    for _, atlasName in ipairs(candidates) do
-                        if C_Texture.GetAtlasInfo(atlasName) then
-                            row.roleIcon:SetAtlas(atlasName)
-                            row.roleIcon:Show()
-                            useAtlas = true
-                            break
-                        end
-                    end
-                end
-                if not useAtlas then
-                    local path = "Interface\\LFGFrame\\UI-LFG-Icon-PortraitRoles"
-                    local l, r, t, b
-                    if role == "TANK" then
-                        l, r, t, b = 0, 0.28125, 0.328125, 0.625
-                    elseif role == "HEALER" then
-                        l, r, t, b = 0.3125, 0.59375, 0, 0.296875
-                    else
-                        l, r, t, b = 0.3125, 0.59375, 0.328125, 0.625
-                    end
-                    row.roleIcon:SetTexture(path)
-                    row.roleIcon:SetTexCoord(l, r, t, b)
-                    row.roleIcon:SetDrawLayer("OVERLAY", 0)
-                    row.roleIcon:Show()
-                end
-            end
-            
-            -- Check if this player is one of the user's characters
-            local isUserCharacter = false
-            if player.name then
-                if MPT.Database and MPT.Database.GetAllCharacters then
-                    local chars = MPT.Database:GetAllCharacters()
-                    for _, char in ipairs(chars) do
-                        local fullName = char.name .. "-" .. char.realm
-                        local shortName = player.name:match("^([^%-]+)") or player.name
-                        local shortCharName = char.name:match("^([^%-]+)") or char.name
-                        if player.name == fullName or shortName == shortCharName then
-                            isUserCharacter = true
-                            break
-                        end
-                    end
-                end
-            end
-
-            local scoreDelta = ResolvePlayerScoreDelta(player, stats, nameText, isUserCharacter)
-            local scoreDeltaTag = FormatScoreDeltaTag(scoreDelta)
-            if scoreDeltaTag then
-                row.name:SetText(baseNameText .. " " .. scoreDeltaTag)
-            else
-                row.name:SetText(baseNameText)
-            end
-            
-            local personalBest = GetPersonalBestStats(runRecord.dungeonID, runRecord.dungeonName, player.name)
-            local damageValue = stats.damage or 0
-            local healingValue = stats.healing or 0
-            local interruptsValue = stats.interrupts or 0
-            local dispelsValue = stats.dispels or 0
-            local deathsValue = stats.deaths or 0
-            local avoidableDamageTakenValue = stats.avoidableDamageTaken or 0
-            local durationSec = (runRecord and runRecord.duration) and tonumber(runRecord.duration) or 0
-            if durationSec <= 0 and runRecord and runRecord.duration then
-                durationSec = tonumber(runRecord.duration) or 0
-            end
-            local dpsValue = stats.damagePerSecond or (durationSec > 0 and math.floor((damageValue or 0) / durationSec)) or 0
-            local hpsValue = stats.healingPerSecond or (durationSec > 0 and math.floor((healingValue or 0) / durationSec)) or 0
-
-            local damageText = MPT.Utils:FormatNumber(damageValue)
-            local healingText = MPT.Utils:FormatNumber(healingValue)
-            local dpsText = MPT.Utils:FormatNumber(dpsValue)
-            local hpsText = MPT.Utils:FormatNumber(hpsValue)
-            local interruptsText = tostring(interruptsValue)
-            local dispelsText = tostring(dispelsValue)
-            local deathsText = tostring(deathsValue)
-            local avoidableText = MPT.Utils:FormatNumber(avoidableDamageTakenValue)
-
-            if dpsValue and dpsValue > 0 then
-                totalsDPSFromPlayers = totalsDPSFromPlayers + dpsValue
-                hasAnyStoredDPS = true
-            end
-            if hpsValue and hpsValue > 0 then
-                totalsHPSFromPlayers = totalsHPSFromPlayers + hpsValue
-                hasAnyStoredHPS = true
-            end
-
-            -- Only highlight in orange if this is the user's character AND they achieved a personal best
-            if isUserCharacter then
-                if damageValue > 0 and damageValue >= personalBest.damage then
-                    damageText = "|cffff8000" .. damageText .. "|r"
-                end
-                if healingValue > 0 and healingValue >= personalBest.healing then
-                    healingText = "|cffff8000" .. healingText .. "|r"
-                end
-                if interruptsValue > 0 and interruptsValue >= personalBest.interrupts then
-                    interruptsText = "|cffff8000" .. interruptsText .. "|r"
-                end
-                if dispelsValue > 0 and dispelsValue >= personalBest.dispels then
-                    dispelsText = "|cffff8000" .. dispelsText .. "|r"
-                end
-            end
-
-            row.damage:SetText(SafeText(damageText, "0"))
-            if row.dps then row.dps:SetText(SafeText(dpsText, "0")) end
-            row.healing:SetText(SafeText(healingText, "0"))
-            if row.hps then row.hps:SetText(SafeText(hpsText, "0")) end
-            row.interrupts:SetText(SafeText(interruptsText, "0"))
-            if row.dispels then row.dispels:SetText(SafeText(dispelsText, "0")) end
-            if row.deaths then row.deaths:SetText(SafeText(deathsText, "0")) end
-            if row.avoidable then row.avoidable:SetText(SafeText(avoidableText, "0")) end
-            
-            -- Show rating and add-friend buttons only for non-user players
-            local playerNameForActions = nameText or player.name
-            if isUserCharacter then
-                if row.ratingUpBtn then row.ratingUpBtn:Hide() end
-                if row.ratingDownBtn then row.ratingDownBtn:Hide() end
-                if row.addFriendBtn then row.addFriendBtn:Hide() end
-            else
-                -- Per-run rating: read and write rating scoped to this specific run's ID
-                local runID = runRecord and runRecord.id
-                local rating = (MPT.Database and MPT.Database.GetRunPlayerRating and playerNameForActions and runID) and MPT.Database:GetRunPlayerRating(runID, playerNameForActions) or nil
-                local isFriend = IsPlayerFriend(playerNameForActions)
-                
-                if row.ratingUpBtn then
-                    row.ratingUpBtn:Show()
-                    -- Selected: white brackets + green plus. Unselected: dim green plus.
-                    row.ratingUpBtn:SetText(rating == "good" and "|cffffffff[|r|cff00ff00+|r|cffffffff]|r" or "|cff88ff88+|r")
-                    row.ratingUpBtn:SetScript("OnClick", function()
-                        if MPT.Database and playerNameForActions and runID then
-                            -- Toggle: clicking + again clears the rating for this run
-                            local current = MPT.Database:GetRunPlayerRating(runID, playerNameForActions)
-                            local newRating = (current == "good") and nil or "good"
-                            MPT.Database:SetRunPlayerRating(runID, playerNameForActions, newRating)
-                            if IsPlayerFriend(playerNameForActions) and C_FriendList and C_FriendList.SetFriendNotes then
-                                C_FriendList.SetFriendNotes(playerNameForActions, GetRatingNoteForFriend(playerNameForActions))
-                            end
-                            Scoreboard:Show(runRecord)
-                        end
-                    end)
-                end
-                if row.ratingDownBtn then
-                    row.ratingDownBtn:Show()
-                    -- Selected: white brackets + red minus. Unselected: dim red minus.
-                    row.ratingDownBtn:SetText(rating == "bad" and "|cffffffff[|r|cffff4444-|r|cffffffff]|r" or "|cffff8888-|r")
-                    row.ratingDownBtn:SetScript("OnClick", function()
-                        if MPT.Database and playerNameForActions and runID then
-                            -- Toggle: clicking - again clears the rating for this run
-                            local current = MPT.Database:GetRunPlayerRating(runID, playerNameForActions)
-                            local newRating = (current == "bad") and nil or "bad"
-                            MPT.Database:SetRunPlayerRating(runID, playerNameForActions, newRating)
-                            if IsPlayerFriend(playerNameForActions) and C_FriendList and C_FriendList.SetFriendNotes then
-                                C_FriendList.SetFriendNotes(playerNameForActions, GetRatingNoteForFriend(playerNameForActions))
-                            end
-                            Scoreboard:Show(runRecord)
-                        end
-                    end)
-                end
-                if row.addFriendBtn then
-                    row.addFriendBtn:Show()
-                    if isFriend then
-                        row.addFriendBtn:SetText("Friends")
-                        row.addFriendBtn:Disable()
-                        row.addFriendBtn:SetScript("OnClick", function() end)
-                        row.addFriendBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Already on friend list") end)
-                    else
-                        row.addFriendBtn:SetText("Add")
-                        row.addFriendBtn:Enable()
-                        row.addFriendBtn:SetScript("OnClick", function()
-                            if C_FriendList and C_FriendList.AddFriend and playerNameForActions then
-                                local note = GetRatingNoteForFriend(playerNameForActions)
-                                C_FriendList.AddFriend(playerNameForActions, note)
-                                row.addFriendBtn:SetText("Friends")
-                                row.addFriendBtn:Disable()
-                                row.addFriendBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Already on friend list") end)
-                            end
-                        end)
-                        row.addFriendBtn:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:SetText("Add to friend list") end)
-                    end
-                    row.addFriendBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-                end
-            end
-
-            totalsDamage = totalsDamage + (stats.damage or 0)
-            totalsHealing = totalsHealing + (stats.healing or 0)
-            totalsInterrupts = totalsInterrupts + (stats.interrupts or 0)
-            totalsDispels = totalsDispels + (stats.dispels or 0)
-            totalsDeaths = totalsDeaths + (stats.deaths or 0)
-            totalsAvoidable = totalsAvoidable + (stats.avoidableDamageTaken or 0)
-
-            if row.score then
-                row.score:SetText(tostring(i))
-            end
-
-            mvpCandidates[i] = {
-                player = entry.player,
-                stats = entry.stats,
-                role = entry.role,
-            }
-
-            row.frame:Show()
+            star.Icon:SetVertexColor(Theme:Unpack("muted", 0.3))
         end
     end
+end
 
-    -- MVP must always match the ranked list: rank #1 is MVP.
-    -- candidateList is already sorted by balanced_roles score (highest first), and mvpCandidates
-    -- mirrors the displayed rows in that same order.
-    if runRecord.abandonReason ~= "abandon" then
-        local top = mvpCandidates[1]
-        if top and top.stats then
-            mvpIndex = 1
-            mvpStats = top.stats
-            mvpPlayer = top.player
-            mvpScore = candidateList[1] and candidateList[1].score or nil
-        end
+-- Whisper targets need "Name-Realm" with no spaces; unit tokens can't be whispered.
+local function WhisperTarget(playerName)
+    if type(playerName) ~= "string" or playerName == "Unknown" then return nil end
+    if playerName:match("^party%d") or playerName == "player" then return nil end
+    return (playerName:gsub("%s+", ""))
+end
+
+local function SendWhisper(message, target)
+    local send = (C_ChatInfo and C_ChatInfo.SendChatMessage) or SendChatMessage
+    if not send then return false end
+    return (pcall(send, message, "WHISPER", nil, target))
+end
+
+-- Tells the player they got 5 stars, once per run, and only while the run is recent.
+local function WhisperFiveStarRating(runRecord, playerName)
+    local db = MPT.Database
+    local target = WhisperTarget(playerName)
+    if not target or db:WasRatingWhisperSent(runRecord.id, playerName) then return end
+    if time() - (runRecord.timestamp or 0) > RATING_WHISPER_WINDOW then return end
+
+    local keyText = runRecord.dungeonName or "the dungeon"
+    if runRecord.keystoneLevel then
+        keyText = keyText .. " +" .. tostring(runRecord.keystoneLevel)
     end
-
-    -- Clear MVP highlights
-    for i = 1, 5 do
-        if frame.PlayerRows[i] and frame.PlayerRows[i].mvpBg then
-            frame.PlayerRows[i].mvpBg:Hide()
-        end
-    end
-
-    -- Check if we have any combat data at all
-    local noCombatData = (totalsDamage == 0 and totalsHealing == 0 and totalsInterrupts == 0)
-    
-    -- Total deaths: use run record (already max of API and combat-log sum when saved), else sum from player rows
-    local totalDeaths = (runRecord.deathCount ~= nil and runRecord.deathCount >= 0) and runRecord.deathCount or totalsDeaths
-    totalDeaths = math.max(totalDeaths, totalsDeaths)
-
-    local durationSec = (runRecord and runRecord.duration) and tonumber(runRecord.duration) or 0
-    local totalDPS = hasAnyStoredDPS and totalsDPSFromPlayers or ((durationSec > 0 and totalsDamage > 0) and math.floor(totalsDamage / durationSec) or 0)
-    local totalHPS = hasAnyStoredHPS and totalsHPSFromPlayers or ((durationSec > 0 and totalsHealing > 0) and math.floor(totalsHealing / durationSec) or 0)
-    if noCombatData then
-        frame.TotalsText:SetText("|cffff4444No combat data available - see chat for details|r")
+    local message = string.format("You were rated 5 stars for that run (%s) on Storm's Dungeon Data. Thanks for the group!", keyText)
+    if SendWhisper(message, target) then
+        db:MarkRatingWhisperSent(runRecord.id, playerName)
     else
-        frame.TotalsText:SetText(string.format(
-            "Damage: |cffff8000%s|r   DPS: |cffff8000%s|r   Healing: |cff00ff00%s|r   HPS: |cff00ff00%s|r   Interrupts: |cff0088ff%d|r   Dispels: |cff00ffff%d|r   Deaths: |cffff4444%d|r",
-            MPT.Utils:FormatNumber(totalsDamage),
-            MPT.Utils:FormatNumber(totalDPS),
-            MPT.Utils:FormatNumber(totalsHealing),
-            MPT.Utils:FormatNumber(totalHPS),
-            totalsInterrupts,
-            totalsDispels,
-            totalDeaths
-        ))
+        print("|cff00ffaa[StormsDungeonData]|r Couldn't whisper " .. target .. " about their 5-star rating.")
+    end
+end
+
+local function RateRunPlayer(runRecord, playerName, stars)
+    local db = MPT.Database
+    if not (db and playerName and runRecord.id) then return end
+    -- Clicking the current rating again clears it for this run
+    local current = db:GetRunPlayerRating(runRecord.id, playerName)
+    local newStars = (current ~= stars) and stars or nil
+    db:SetRunPlayerRating(runRecord.id, playerName, newStars)
+    if newStars == db.RATING_MAX_STARS then
+        WhisperFiveStarRating(runRecord, playerName)
+    end
+    if IsPlayerFriend(playerName) and C_FriendList and C_FriendList.SetFriendNotes then
+        C_FriendList.SetFriendNotes(playerName, GetRatingNoteForFriend(playerName))
+    end
+    Scoreboard:Show(runRecord)
+end
+
+local function WireRatingButtons(card, runRecord, playerName)
+    local db = MPT.Database
+    local rating = (playerName and runRecord.id) and db:GetRunPlayerRating(runRecord.id, playerName) or 0
+    PaintStars(card, rating)
+
+    for _, star in ipairs(card.Stars) do
+        local value = star.value
+        star:SetScript("OnClick", function() RateRunPlayer(runRecord, playerName, value) end)
+        star:SetScript("OnEnter", function(b)
+            PaintStars(card, value)
+            GameTooltip:SetOwner(b, "ANCHOR_TOP")
+            GameTooltip:SetText(string.format("Rate %d %s for this run", value, value == 1 and "star" or "stars"))
+            if value == rating then
+                GameTooltip:AddLine("Click again to clear", MPT.Theme:Unpack("muted"))
+            elseif value == db.RATING_MAX_STARS and not db:WasRatingWhisperSent(runRecord.id, playerName) then
+                GameTooltip:AddLine("Whispers " .. ShortNameForCard(playerName) .. " to let them know", MPT.Theme:Unpack("muted"))
+            end
+            GameTooltip:Show()
+        end)
+        star:SetScript("OnLeave", function()
+            PaintStars(card, rating)
+            GameTooltip:Hide()
+        end)
     end
 
-    if mvpIndex and frame.PlayerRows[mvpIndex] and frame.PlayerRows[mvpIndex].mvpBg then
-        frame.PlayerRows[mvpIndex].mvpBg:Show()
+    local friendBtn = card.FriendBtn
+    friendBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    if IsPlayerFriend(playerName) then
+        friendBtn:SetText("Friends")
+        friendBtn:Disable()
+        friendBtn:SetScript("OnClick", nil)
+        friendBtn:SetScript("OnEnter", function(b) GameTooltip:SetOwner(b, "ANCHOR_TOP"); GameTooltip:SetText("Already on friend list"); GameTooltip:Show() end)
+    else
+        friendBtn:SetText("Friend")
+        friendBtn:Enable()
+        friendBtn:SetScript("OnEnter", function(b) GameTooltip:SetOwner(b, "ANCHOR_TOP"); GameTooltip:SetText("Add to friend list"); GameTooltip:Show() end)
+        friendBtn:SetScript("OnClick", function()
+            if C_FriendList and C_FriendList.AddFriend and playerName then
+                C_FriendList.AddFriend(playerName, GetRatingNoteForFriend(playerName))
+                friendBtn:SetText("Friends")
+                friendBtn:Disable()
+            end
+        end)
+    end
+end
+
+local function HighlightIfBest(text, value, best, isUser)
+    if isUser and value > 0 and value >= best then
+        return MPT.Theme:Colorize(text, "pb")
+    end
+    return text
+end
+
+-- Fills one card. Returns the scoreDelta for the user's own card (or nil).
+local function PopulateCard(card, entry, rank, ctx)
+    local Theme = MPT.Theme
+    local player, stats = entry.player, entry.stats
+    local nameText = ResolveDisplayName(player, stats)
+    local isUser = IsUserName(ctx.userSet, player.name)
+
+    local r, g, b = Theme:ClassColor(entry.class)
+    SetCardGradient(card.Band, r, g, b)
+    card.Ring:SetVertexColor(r, g, b, 1)
+    local spec = Theme:SpecInfo(entry.specID)
+    card.Avatar:SetTexture((spec and spec.icon) or Theme:ClassIcon(entry.class))
+    card.Avatar:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+    local scoreDelta = ResolvePlayerScoreDelta(ctx.runRecord, player, stats, nameText, isUser)
+    local deltaTag = FormatScoreDeltaTag(scoreDelta)
+    card.Name:SetText(deltaTag and (ShortNameForCard(nameText) .. " " .. deltaTag) or ShortNameForCard(nameText))
+    card.Name:SetTextColor(r, g, b, 1)
+
+    local specLine = spec and (spec.name .. " " .. (spec.className or "")) or (entry.class and entry.class:sub(1, 1) .. entry.class:sub(2):lower() or "")
+    card.Spec:SetText(RoleMarkup(entry.role) .. specLine)
+    card.Hero:SetText((isUser and ctx.runRecord.heroName) or "")
+    card.RankText:SetText("#" .. tostring(rank))
+
+    local rel = (ctx.topScore and ctx.topScore > 0) and math.floor((entry.score or 0) / ctx.topScore * 100 + 0.5) or 0
+    card.relScore = rel
+
+    local duration = ctx.duration
+    local damage, healing = stats.damage or 0, stats.healing or 0
+    local interrupts, dispels = stats.interrupts or 0, stats.dispels or 0
+    local deaths, avoidable = stats.deaths or 0, stats.avoidableDamageTaken or 0
+    local dps = stats.damagePerSecond or (duration > 0 and math.floor(damage / duration)) or 0
+    local hps = stats.healingPerSecond or (duration > 0 and math.floor(healing / duration)) or 0
+    local pb = ctx.personalBest
+
+    local F = function(n) return MPT.Utils:FormatNumber(n) end
+    card.interrupts:SetText(HighlightIfBest(tostring(interrupts), interrupts, pb.interrupts, isUser))
+    card.dispels:SetText(HighlightIfBest(tostring(dispels), dispels, pb.dispels, isUser))
+    card.dps:SetText(F(dps))
+    card.hps:SetText(F(hps))
+    card.avoidable:SetText(F(avoidable))
+    card.deaths:SetText(deaths > 0 and Theme:Colorize(deaths, "bad") or "0")
+
+    card.barValues = {
+        dps = ctx.max.dps > 0 and dps / ctx.max.dps or 0,
+        hps = ctx.max.hps > 0 and hps / ctx.max.hps or 0,
+        int = ctx.max.int > 0 and interrupts / ctx.max.int or 0,
+        disp = ctx.max.disp > 0 and dispels / ctx.max.disp or 0,
+        avoid = ctx.max.avoid > 0 and avoidable / ctx.max.avoid or 0,
+    }
+    for _, bar in ipairs({card.DPSBar, card.HPSBar, card.IntBar, card.DispBar}) do
+        bar:SetColor(r, g, b)
     end
 
+    if isUser then
+        card.StarRow:Hide(); card.FriendBtn:Hide()
+        card.YouText:Show()
+    else
+        card.YouText:Hide()
+        card.StarRow:Show(); card.FriendBtn:Show()
+        WireRatingButtons(card, ctx.runRecord, nameText)
+    end
+
+    return isUser and scoreDelta or nil, dps, hps
+end
+
+-- Header line: key, time vs limit, timed result, timer bar.
+local function PopulateHeader(frame, runRecord, duration)
+    local Theme = MPT.Theme
+    frame.DungeonName:SetText(runRecord.dungeonName or "Unknown dungeon")
+    frame.KeystoneLevel:SetText("+" .. tostring(runRecord.keystoneLevel or 0))
+    frame.KeyChip:SetWidth(math.max(40, frame.KeystoneLevel:GetStringWidth() + 18))
+    frame.Eyebrow:SetText("Run complete · " .. date("%b %d, %I:%M %p", runRecord.timestamp or time()))
+
+    local info = Theme:DungeonInfo(runRecord.dungeonID or runRecord.mapID)
+    local limit = info and info.timeLimit
+    local timeText = MPT.Utils:FormatDuration(duration)
+    frame.Duration:SetText(limit and (timeText .. " of " .. MPT.Utils:FormatDuration(limit)) or timeText)
+
+    local resultText, resultColor
     if runRecord.abandonReason == "abandon" then
-        frame.MVPName:SetText("--")
-        frame.MVPName:SetTextColor(0.6, 0.6, 0.6, 1)
-        frame.MVPDetails:SetText("")
-    elseif mvpPlayer and frame.MVPName and frame.MVPDetails then
-        -- MVP name (class-colored)
-        local mvpName = nil
-        if type(mvpPlayer.name) == "string" and mvpPlayer.name ~= "" then
-            mvpName = mvpPlayer.name
-        elseif type(mvpPlayer.unitID) == "string" and mvpPlayer.unitID ~= "" then
-            mvpName = mvpPlayer.unitID
-        elseif mvpStats and type(mvpStats.name) == "string" and mvpStats.name ~= "" then
-            mvpName = mvpStats.name
+        resultText, resultColor = "Abandoned", "bad"
+    else
+        local chests = Theme:ChestCount(duration, limit)
+        if chests and chests > 0 then
+            resultText, resultColor = "Timed +" .. chests, "good"
+        elseif chests == 0 or runRecord.onTime == false or runRecord.completed == false then
+            resultText, resultColor = "Depleted", "bad"
+        elseif runRecord.onTime then
+            resultText, resultColor = "Timed", "good"
         end
-        frame.MVPName:SetText(SafeText(mvpName, "--"))
-        if runRecord and mvpName and mvpName ~= "" then
-            runRecord.mvpName = mvpName
-        end
-        local classToken = mvpPlayer.class
-        if classToken and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classToken] then
-            local c = RAID_CLASS_COLORS[classToken]
-            frame.MVPName:SetTextColor(c.r, c.g, c.b)
-        elseif classToken and MPT.Utils and MPT.Utils.GetClassColor and MPT.UIUtils and MPT.UIUtils.HexToRGB then
-            local r, g, b = MPT.UIUtils:HexToRGB(MPT.Utils:GetClassColor(classToken))
-            frame.MVPName:SetTextColor(r, g, b)
+    end
+    frame.Result:SetText(resultText or "")
+    if resultColor then frame.Result:SetTextColor(Theme:Unpack(resultColor)) end
+
+    if limit and limit > 0 then
+        frame.TimerBar:Show()
+        frame.TimerBar:SetColor(Theme:Unpack(resultColor == "bad" and "bad" or "good"))
+        return math.min(1, duration / limit)
+    end
+    frame.TimerBar:Hide()
+    return nil
+end
+
+local function PlayIntro(frame, cards, visibleCount, isMVP, timerFraction)
+    local Theme = MPT.Theme
+    if timerFraction then frame.TimerBar:SetFraction(timerFraction, true, 0.1) end
+    for i = 1, visibleCount do
+        local card = cards[i]
+        local delay = 0.08 + (i - 1) * 0.11
+        card.Glow:SetAlpha(0)
+        Theme:SlideIn(card, {"BOTTOMLEFT", frame.CardsArea, "BOTTOMLEFT", card.anchorX, 0}, 90, 0, 0.45, delay, nil,
+            (i == 1 and isMVP) and function()
+                -- MVP card lifts 8px and pulses gold once
+                Theme:Tween(card, 0.35, 0, function(p)
+                    card:ClearAllPoints()
+                    card:SetPoint("BOTTOMLEFT", frame.CardsArea, "BOTTOMLEFT", card.anchorX, 8 * p)
+                end)
+                Theme:Pulse(card.Glow, 0.9, 0.35, 1.4, 0.15)
+            end or nil)
+        Theme:CountUp(card.Score, card.relScore or 0, 0.7, delay + 0.25)
+        local bv = card.barValues or {}
+        card.DPSBar:SetFraction(bv.dps, true, delay + 0.35)
+        card.HPSBar:SetFraction(bv.hps, true, delay + 0.4)
+        card.IntBar:SetFraction(bv.int, true, delay + 0.45)
+        card.DispBar:SetFraction(bv.disp, true, delay + 0.5)
+        card.AvoidBar:SetFraction(bv.avoid, true, delay + 0.55)
+    end
+end
+
+local function ShowStatic(frame, cards, visibleCount, isMVP, timerFraction)
+    if timerFraction then frame.TimerBar:SetFraction(timerFraction, false) end
+    for i = 1, visibleCount do
+        local card = cards[i]
+        MPT.Theme:CancelTween(card)
+        MPT.Theme:CancelTween(card.Score)
+        MPT.Theme:CancelTween(card.Glow)
+        card:ClearAllPoints()
+        card:SetPoint("BOTTOMLEFT", frame.CardsArea, "BOTTOMLEFT", card.anchorX, (i == 1 and isMVP) and 8 or 0)
+        card:SetAlpha(1)
+        card.Glow:SetAlpha((i == 1 and isMVP) and 0.35 or 0)
+        card.Score:SetText(tostring(card.relScore or 0))
+        local bv = card.barValues or {}
+        card.DPSBar:SetFraction(bv.dps); card.HPSBar:SetFraction(bv.hps)
+        card.IntBar:SetFraction(bv.int); card.DispBar:SetFraction(bv.disp)
+        card.AvoidBar:SetFraction(bv.avoid)
+    end
+end
+
+function Scoreboard:Show(runRecord)
+    if not runRecord then
+        print("|cff00ffaa[StormsDungeonData]|r No run record provided")
+        return
+    end
+
+    local Theme = MPT.Theme
+    local frame = self:Create()
+    local wasShown = frame:IsShown()
+    local previousRunID = self.displayedRunID
+    local runList, idx = self:GetRunListAndIndex(runRecord)
+    self.runList = runList
+    self.currentRunIndex = idx or 1
+    self.displayedRunID = runRecord.id or runRecord.timestamp
+
+    if not runRecord.specIcon then
+        local spec = GetPlayerSpecInfoSafe()
+        if spec and spec.specIcon then runRecord.specIcon = spec.specIcon end
+    end
+    if not runRecord.heroIcon then
+        local hero = GetHeroTalentInfoSafe()
+        if hero and hero.heroIcon and hero.heroIcon ~= 0 then runRecord.heroIcon = hero.heroIcon end
+    end
+    frame.SpecIconText:SetText((runRecord.specIcon and runRecord.specIcon ~= 0) and ("|T" .. tostring(runRecord.specIcon) .. ":14:14:0:0|t") or "")
+    frame.HeroIconText:SetText(runRecord.heroName or "")
+
+    local duration = tonumber(runRecord.duration) or (runRecord.endTime and runRecord.startTime and (runRecord.endTime - runRecord.startTime)) or 0
+    local timerFraction = PopulateHeader(frame, runRecord, duration)
+
+    local candidates, totals, playerCount = BuildCandidates(runRecord)
+    local isAbandoned = runRecord.abandonReason == "abandon"
+    local userSet = BuildUserCharacterSet()
+    local ctx = {
+        runRecord = runRecord,
+        userSet = userSet,
+        duration = duration,
+        topScore = candidates[1] and candidates[1].score or 0,
+        personalBest = GetPersonalBestStats(runRecord, userSet),
+        max = {dps = 0, hps = 0, int = 0, disp = 0, avoid = 0},
+    }
+    for _, c in ipairs(candidates) do
+        local s = c.stats
+        ctx.max.dps = math.max(ctx.max.dps, s.damagePerSecond or (duration > 0 and (s.damage or 0) / duration) or 0)
+        ctx.max.hps = math.max(ctx.max.hps, s.healingPerSecond or (duration > 0 and (s.healing or 0) / duration) or 0)
+        ctx.max.int = math.max(ctx.max.int, s.interrupts or 0)
+        ctx.max.disp = math.max(ctx.max.disp, s.dispels or 0)
+        ctx.max.avoid = math.max(ctx.max.avoid, s.avoidableDamageTaken or 0)
+    end
+
+    local userDelta
+    local totalDPS, totalHPS = 0, 0
+    local visibleCount = math.min(5, #candidates)
+    for i = 1, 5 do
+        local card = frame.PlayerRows[i]
+        local entry = candidates[i]
+        if entry then
+            card:Show()
+            local delta, dps, hps = PopulateCard(card, entry, i, ctx)
+            userDelta = userDelta or delta
+            totalDPS = totalDPS + (dps or 0)
+            totalHPS = totalHPS + (hps or 0)
         else
-            frame.MVPName:SetTextColor(1, 0.82, 0, 1)
-        end
-
-        -- MVP section only shows the name, no stats
-        frame.MVPDetails:SetText("")
-    end
-
-    -- Hide unused rows
-    local numRows = #playerData
-    for i = numRows + 1, 5 do
-        if frame.PlayerRows[i] then
-            if frame.PlayerRows[i].roleIcon then
-                frame.PlayerRows[i].roleIcon:Hide()
-            end
-            if frame.PlayerRows[i].roleLabel then
-                frame.PlayerRows[i].roleLabel:Hide()
-            end
-            frame.PlayerRows[i].frame:Hide()
+            card:Hide()
         end
     end
-    
-    -- Update run navigation: label and button states
+
+    -- MVP: rank #1 by balanced_roles score; none for abandoned keys
+    local isMVP = (not isAbandoned) and candidates[1] ~= nil
+    local lead = frame.PlayerRows[1]
+    lead.MVPTag:SetShown(isMVP)
+    Theme:SetPanelColors(lead, "surface", isMVP and "gold" or "line")
+    lead.Score:SetTextColor(Theme:Unpack(isMVP and "gold" or "text"))
+    lead.Why:SetText(isMVP and BuildMVPReasons(candidates) or "")
+    if isMVP then
+        runRecord.mvpName = ResolveDisplayName(candidates[1].player, candidates[1].stats)
+    end
+
+    frame.RatingGain:SetText(userDelta and ((userDelta > 0 and "+" or "") .. tostring(userDelta) .. " rating") or "")
+    frame.RatingGain:SetTextColor(Theme:Unpack((userDelta or 0) < 0 and "bad" or "good"))
+
+    if totals.damage == 0 and totals.healing == 0 and totals.interrupts == 0 then
+        frame.TotalsText:SetText(Theme:Colorize("No combat data available. See chat for details.", "bad"))
+    else
+        local totalDeaths = math.max(tonumber(runRecord.deathCount) or 0, totals.deaths)
+        frame.TotalsText:SetText(string.format("Group: %s dps · %s hps · %d kicks · %d dispels · %d deaths",
+            MPT.Utils:FormatNumber(totalDPS), MPT.Utils:FormatNumber(totalHPS),
+            totals.interrupts, totals.dispels, totalDeaths))
+    end
+
     local n = #(self.runList or {})
-    if frame.RunNavLabel then
-        if n > 0 and self.currentRunIndex then
-            frame.RunNavLabel:SetText(string.format("Run %d of %d", self.currentRunIndex, n))
-        else
-            frame.RunNavLabel:SetText("")
-        end
+    frame.RunNavLabel:SetText((n > 0 and self.currentRunIndex) and string.format("Run %d of %d", self.currentRunIndex, n) or "")
+    frame.PrevButton:SetEnabled(n > 1 and self.currentRunIndex < n)
+    frame.NextButton:SetEnabled(n > 1 and self.currentRunIndex > 1)
+    if frame.AutoReportCheck and frame.AutoReportCheck.Refresh then
+        frame.AutoReportCheck:Refresh()
     end
-    if frame.PrevButton then
-        if n > 1 and self.currentRunIndex and self.currentRunIndex < n then
-            frame.PrevButton:Enable()
-        else
-            frame.PrevButton:Disable()
-        end
-    end
-    if frame.NextButton then
-        if n > 1 and self.currentRunIndex and self.currentRunIndex > 1 then
-            frame.NextButton:Enable()
-        else
-            frame.NextButton:Disable()
-        end
-    end
-    
+
     frame:Show()
+    -- Animate when the window opens or switches runs; rating clicks re-render in place.
+    if (not wasShown) or previousRunID ~= self.displayedRunID then
+        PlayIntro(frame, frame.PlayerRows, visibleCount, isMVP, timerFraction)
+    else
+        ShowStatic(frame, frame.PlayerRows, visibleCount, isMVP, timerFraction)
+    end
 
-    -- Auto-report MVP report to party when the scoreboard first appears for a new run.
-    -- The designated reporter is elected via hidden addon messages among clients
-    -- that have auto-report enabled. If auto-report is off, this is skipped entirely.
-    local runKey = runRecord and (
-        tostring(runRecord.timestamp or "") ..
-        "_" .. tostring(runRecord.mapID or "") ..
-        "_" .. tostring(runRecord.keystoneLevel or "")
-    )
-
-    if runKey and runKey ~= self.lastAutoReportedRunKey then
+    -- Auto-report MVP summary to party once per run when this client is the elected reporter.
+    local runKey = tostring(runRecord.timestamp or "") .. "_" .. tostring(runRecord.mapID or "") .. "_" .. tostring(runRecord.keystoneLevel or "")
+    if runKey ~= self.lastAutoReportedRunKey then
         self.lastAutoReportedRunKey = runKey
-        if IsInGroup() and not IsInRaid() then
-            if MPT.ReporterElection and MPT.ReporterElection:IsDesignatedReporter() then
-                self:ReportRunToChat("PARTY", "summary")
-            end
+        if IsInGroup() and not IsInRaid() and MPT.ReporterElection and MPT.ReporterElection:IsDesignatedReporter() then
+            self:ReportRunToChat("PARTY", "summary")
         end
     end
 end
@@ -2003,4 +1776,3 @@ function Scoreboard:Hide()
         self.frame:Hide()
     end
 end
-

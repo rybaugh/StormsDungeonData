@@ -1,5 +1,5 @@
 -- Storm's Dungeon Data - Player Tooltip
--- Appends SDD good/bad rating lines to the bottom of player unit tooltips.
+-- Appends the SDD star rating line to the bottom of player unit tooltips.
 --
 -- WoW 12.0 taint: TooltipDataProcessor callbacks run in tainted context, so
 -- data.guid is a "secret string" that cannot be passed to string methods or
@@ -13,17 +13,17 @@ if not MPT or not MPT.Database then return end
 local PlayerTooltip = {}
 MPT.PlayerTooltip = PlayerTooltip
 
--- Cached mouseover player full name, normalized rating key, and rating counts (set from UPDATE_MOUSEOVER_UNIT in untainted context).
+-- Cached mouseover player full name, normalized rating key, and star summary (set from UPDATE_MOUSEOVER_UNIT in untainted context).
 local cachedMouseoverName = nil
 local cachedMouseoverRatingKey = nil
-local cachedMouseoverGoodCount = 0
-local cachedMouseoverBadCount = 0
+local cachedMouseoverAverage = nil
+local cachedMouseoverCount = 0
 
 local function ClearCachedMouseoverData()
     cachedMouseoverName = nil
     cachedMouseoverRatingKey = nil
-    cachedMouseoverGoodCount = 0
-    cachedMouseoverBadCount = 0
+    cachedMouseoverAverage = nil
+    cachedMouseoverCount = 0
 end
 
 local function NormalizePlayerNameForRatingKey(playerName)
@@ -75,30 +75,8 @@ local function CacheMouseoverPlayer()
     -- Normalize in protected mode so secret-string taint cannot hard-error.
     cachedMouseoverRatingKey = SafeNormalizePlayerNameForRatingKey(cachedMouseoverName)
 
-    -- Compute rating counts in untainted context by iterating runs directly
-    local goodCount = 0
-    local badCount = 0
-    if cachedMouseoverRatingKey and StormsDungeonDataDB and StormsDungeonDataDB.runs then
-        for _, run in ipairs(StormsDungeonDataDB.runs) do
-            if run.players then
-                for _, player in ipairs(run.players) do
-                    -- Safely compute player key once and compare
-                    if player.name and type(player.name) == "string" then
-                        local pKey = NormalizePlayerNameForRatingKey(player.name)
-                        if pKey == cachedMouseoverRatingKey then
-                            if player.rating == "good" then
-                                goodCount = goodCount + 1
-                            elseif player.rating == "bad" then
-                                badCount = badCount + 1
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-    cachedMouseoverGoodCount = goodCount
-    cachedMouseoverBadCount = badCount
+    -- Compute the star summary in untainted context from the normalized key
+    cachedMouseoverAverage, cachedMouseoverCount = MPT.Database:GetRatingSummaryByKey(cachedMouseoverRatingKey)
 end
 
 -- Track whether we already added our lines to this tooltip refresh.
@@ -117,24 +95,14 @@ end
 -- Core logic: add SDD rating lines to the given tooltip.
 -- Does NOT call tooltip:Show() — the tooltip framework handles that after
 -- all processors run, which avoids the flicker/re-entry loop.
--- Uses pre-cached counts computed in untainted context to avoid any tainted operations.
-local function AddRatingToTooltip(tooltip, goodCount, badCount)
+-- Uses the pre-cached summary computed in untainted context to avoid any tainted operations.
+local function AddRatingToTooltip(tooltip, average, count)
     if sddTooltipAdded then return end
     if not IsPlayerTooltipEnabled() then return end
     if not tooltip or not MPT.Database then return end
 
     sddTooltipAdded = true
-    local ratingText
-    if goodCount > 0 and badCount > 0 then
-        ratingText = "|cff00ff00+" .. goodCount .. " Good|r / |cffff4444+" .. badCount .. " Bad|r"
-    elseif goodCount > 0 then
-        ratingText = "|cff00ff00+" .. goodCount .. " Good|r"
-    elseif badCount > 0 then
-        ratingText = "|cffff4444+" .. badCount .. " Bad|r"
-    else
-        ratingText = "|cffffffffNo rating yet|r"
-    end
-    tooltip:AddLine("|cff00ffaaStorm's Dungeon Data:|r " .. ratingText)
+    tooltip:AddLine("|cff00ffaaStorm's Dungeon Data:|r " .. MPT.Utils:FormatStarSummary(average, count))
 end
 
 function PlayerTooltip:Initialize()
@@ -160,16 +128,16 @@ function PlayerTooltip:Initialize()
             if tooltip ~= GameTooltip then return end
             if not IsPlayerTooltipEnabled() then return end
             if cachedMouseoverRatingKey then
-                -- Pass only the pre-computed counts; never pass tainted player name data
-                AddRatingToTooltip(tooltip, cachedMouseoverGoodCount, cachedMouseoverBadCount)
+                -- Pass only the pre-computed summary; never pass tainted player name data
+                AddRatingToTooltip(tooltip, cachedMouseoverAverage, cachedMouseoverCount)
             end
         end)
     elseif GameTooltip and GameTooltip.HookScript then
         GameTooltip:HookScript("OnTooltipSetUnit", function(tooltip)
             if not IsPlayerTooltipEnabled() then return end
             if cachedMouseoverRatingKey then
-                -- Pass only the pre-computed counts; never pass tainted player name data
-                AddRatingToTooltip(tooltip, cachedMouseoverGoodCount, cachedMouseoverBadCount)
+                -- Pass only the pre-computed summary; never pass tainted player name data
+                AddRatingToTooltip(tooltip, cachedMouseoverAverage, cachedMouseoverCount)
             end
         end)
     end
