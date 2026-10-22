@@ -436,6 +436,9 @@ function CombatLog:FinalizeNewAPIData()
         for playerName, stats in pairs(interruptData) do
             local resolvedName = playerName
             local sourceGUID = type(stats) == "table" and (stats.sourceGUID or stats.guid) or nil
+            if MPT.DamageMeterCompat.IsSecret(sourceGUID) then
+                sourceGUID = nil
+            end
 
             -- Primary: resolve pet → owner via GUID map.
             -- Try the primary GUID and all additional GUIDs collected when the same

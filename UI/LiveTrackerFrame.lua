@@ -24,26 +24,6 @@ local PLAYER_COLORS = {
     { 0.9, 0.4, 0.9 }, -- magenta
 }
 
-local function SetBackdropCompat(frame, backdropInfo, backdropColor, backdropBorderColor)
-    if frame.SetBackdrop then
-        frame:SetBackdrop(backdropInfo)
-        if backdropColor then
-            frame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], backdropColor[4])
-        end
-        if backdropBorderColor then
-            frame:SetBackdropBorderColor(backdropBorderColor[1], backdropBorderColor[2], backdropBorderColor[3], backdropBorderColor[4])
-        end
-    elseif frame.SetBackdropInfo then
-        frame:SetBackdropInfo(backdropInfo)
-        if backdropColor then
-            frame:SetBackdropColor(backdropColor[1], backdropColor[2], backdropColor[3], backdropColor[4])
-        end
-        if backdropBorderColor then
-            frame:SetBackdropBorderColor(backdropBorderColor[1], backdropBorderColor[2], backdropBorderColor[3], backdropBorderColor[4])
-        end
-    end
-end
-
 local function FormatNumber(n)
     if n >= 1e9 then
         return string.format("%.1fB", n / 1e9)
@@ -117,11 +97,6 @@ end
 
 local function ShowTrackerTooltip(owner, trackerFrame, title, detail)
     GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
-    -- Keep tooltip above the tracker frame (tracker uses very high frame level).
-    if trackerFrame and trackerFrame.GetFrameStrata and trackerFrame.GetFrameLevel then
-        GameTooltip:SetFrameStrata(trackerFrame:GetFrameStrata() or "TOOLTIP")
-        GameTooltip:SetFrameLevel((trackerFrame:GetFrameLevel() or 0) + 20)
-    end
     GameTooltip:SetText(title or "—")
     if detail and detail ~= "" then
         GameTooltip:AddLine(detail, 0.9, 0.9, 0.9)
@@ -136,39 +111,19 @@ function LiveTrackerFrame:Create()
         return self.frame
     end
 
-    local frame = CreateFrame("Frame", "StormsDungeonDataLiveTracker", UIParent, "BasicFrameTemplateWithInset")
-    frame:SetSize(560, 460)
-    frame:SetPoint("CENTER", UIParent, "CENTER")
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    frame:SetFrameStrata("TOOLTIP")
-    frame:SetFrameLevel(1000)
-
-    frame.TitleBg:SetHeight(30)
-    frame.InsetBg:SetAlpha(0.35)
-
-    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", frame.TitleBg, "TOPLEFT", 10, -5)
-    title:SetText("Live Dungeon Tracker")
-    frame.Title = title
-
-    if not frame.CloseButton and not frame.closeButton then
-        local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-        closeBtn:SetPoint("TOPRIGHT", frame.TitleBg, "TOPRIGHT", -5, -5)
-        closeBtn:SetScript("OnClick", function()
-            MPT.LiveTrackerFrame:Hide()
-        end)
-    end
+    local Theme = MPT.Theme
+    local frame = Theme:Window("StormsDungeonDataLiveTracker", 560, 480, "Live tracker", "DIALOG")
+    frame:SetFrameLevel(120)
+    frame.CloseButton:SetScript("OnClick", function()
+        MPT.LiveTrackerFrame:Hide()
+    end)
 
     -- Toggle: Damage | Healing | Interrupts | DPS | HPS
     self.mode = "damage" -- "damage" | "healing" | "interrupts" | "dps" | "hps"
     local btnW, btnH = 75, 24
-    local damageBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    local damageBtn = MPT.Theme:Button(frame, "", btnW, btnH)
     damageBtn:SetSize(btnW, btnH)
-    damageBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 15, -42)
+    damageBtn:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, -48)
     damageBtn:SetText("Damage")
     damageBtn:SetScript("OnClick", function()
         LiveTrackerFrame.mode = "damage"
@@ -176,7 +131,7 @@ function LiveTrackerFrame:Create()
         LiveTrackerFrame:UpdateButtonHighlight()
     end)
 
-    local healingBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    local healingBtn = MPT.Theme:Button(frame, "", btnW, btnH)
     healingBtn:SetSize(btnW, btnH)
     healingBtn:SetPoint("LEFT", damageBtn, "RIGHT", 4, 0)
     healingBtn:SetText("Healing")
@@ -186,7 +141,7 @@ function LiveTrackerFrame:Create()
         LiveTrackerFrame:UpdateButtonHighlight()
     end)
 
-    local interruptsBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    local interruptsBtn = MPT.Theme:Button(frame, "", btnW, btnH)
     interruptsBtn:SetSize(btnW, btnH)
     interruptsBtn:SetPoint("LEFT", healingBtn, "RIGHT", 4, 0)
     interruptsBtn:SetText("Interrupts")
@@ -196,7 +151,7 @@ function LiveTrackerFrame:Create()
         LiveTrackerFrame:UpdateButtonHighlight()
     end)
 
-    local dpsBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    local dpsBtn = MPT.Theme:Button(frame, "", btnW, btnH)
     dpsBtn:SetSize(btnW, btnH)
     dpsBtn:SetPoint("LEFT", interruptsBtn, "RIGHT", 4, 0)
     dpsBtn:SetText("DPS")
@@ -206,7 +161,7 @@ function LiveTrackerFrame:Create()
         LiveTrackerFrame:UpdateButtonHighlight()
     end)
 
-    local hpsBtn = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    local hpsBtn = MPT.Theme:Button(frame, "", btnW, btnH)
     hpsBtn:SetSize(btnW, btnH)
     hpsBtn:SetPoint("LEFT", dpsBtn, "RIGHT", 4, 0)
     hpsBtn:SetText("HPS")
@@ -233,9 +188,9 @@ function LiveTrackerFrame:Create()
         swatch:SetSize(10, 10)
         swatch:SetPoint("LEFT", row, "LEFT", 0, 0)
         swatch:SetColorTexture(unpack(PLAYER_COLORS[i] or PLAYER_COLORS[1]))
-        local label = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        local label = MPT.Theme:Text(row, 12, "body", "text")
         label:SetPoint("LEFT", swatch, "RIGHT", 4, 0)
-        label:SetText("—")
+        label:SetText("-")
         frame.Legend[i] = { row = row, swatch = swatch, label = label }
     end
 
@@ -251,7 +206,7 @@ function LiveTrackerFrame:Create()
         tile = true, tileSize = 16, edgeSize = 16,
         insets = { left = 2, right = 2, top = 2, bottom = 2 }
     }
-    SetBackdropCompat(chartContainer, backdropInfo, { 0.08, 0.08, 0.12, 0.85 }, { 0.3, 0.3, 0.4, 0.6 })
+    MPT.Theme:Panel(chartContainer, "surface", "line")
 
     -- Chart area (where we draw) - origin bottom-left for easy Y-up mapping
     local chartArea = CreateFrame("Frame", nil, chartContainer)
@@ -385,7 +340,7 @@ function LiveTrackerFrame:Create()
     frame.YGridLines = {}
     for i = 1, 8 do
         local tex = chartArea:CreateTexture(nil, "BACKGROUND")
-        tex:SetColorTexture(0.35, 0.35, 0.4, 0.6)
+        tex:SetColorTexture(MPT.Theme:Unpack("line"))
         tex:SetSize(CHART_WIDTH, 1)
         tex:Hide()
         frame.YGridLines[i] = tex
@@ -395,20 +350,20 @@ function LiveTrackerFrame:Create()
     frame.BossMarkers = {}
     for i = 1, 20 do
         local tex = chartArea:CreateTexture(nil, "OVERLAY")
-        tex:SetColorTexture(1, 0.4, 0.1, 0.9)
+        tex:SetColorTexture(MPT.Theme:Unpack("gold", 0.9))
         tex:SetSize(2, CHART_HEIGHT)
         tex:Hide()
         frame.BossMarkers[i] = tex
     end
 
     -- Axis labels (Y = value, X = time)
-    local yLabel = chartContainer:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local yLabel = MPT.Theme:Text(chartContainer, 11, "body", "muted")
     yLabel:SetPoint("BOTTOMLEFT", chartContainer, "BOTTOMLEFT", 4, CHART_PADDING + CHART_HEIGHT / 2 - 8)
     yLabel:SetJustifyV("MIDDLE")
     yLabel:SetText("0")
     frame.YLabel = yLabel
 
-    local xLabel = chartContainer:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local xLabel = MPT.Theme:Text(chartContainer, 11, "body", "muted")
     xLabel:SetPoint("BOTTOMLEFT", chartContainer, "BOTTOMLEFT", CHART_PADDING + CHART_WIDTH / 2 - 20, 2)
     xLabel:SetText("Time")
     frame.XLabel = xLabel
@@ -422,20 +377,12 @@ end
 function LiveTrackerFrame:UpdateButtonHighlight()
     local frame = self.frame
     if not frame then return end
-    local normal = { 0.5, 0.5, 0.5, 1 }
-    local highlight = { 0.2, 0.7, 0.2, 1 }
-    for _, btn in ipairs({ frame.DamageBtn, frame.HealingBtn, frame.InterruptsBtn, frame.DPSBtn, frame.HPSBtn }) do
-        if btn then
-            btn:GetFontString():SetTextColor(unpack(normal))
-        end
-    end
-    local active = (self.mode == "damage" and frame.DamageBtn) 
-        or (self.mode == "healing" and frame.HealingBtn) 
-        or (self.mode == "interrupts" and frame.InterruptsBtn)
-        or (self.mode == "dps" and frame.DPSBtn)
-        or (self.mode == "hps" and frame.HPSBtn)
-    if active then
-        active:GetFontString():SetTextColor(unpack(highlight))
+    local buttons = {
+        damage = frame.DamageBtn, healing = frame.HealingBtn, interrupts = frame.InterruptsBtn,
+        dps = frame.DPSBtn, hps = frame.HPSBtn,
+    }
+    for mode, btn in pairs(buttons) do
+        MPT.Theme:SetButtonSelected(btn, mode == self.mode)
     end
 end
 

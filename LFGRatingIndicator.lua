@@ -1,5 +1,5 @@
 -- Storm's Dungeon Data - LFG Rating Indicator
--- Shows good/bad player ratings in the Group Finder (search results and applicant list)
+-- Shows SDD star ratings in the Group Finder (search results and applicant list)
 
 local MPT = StormsDungeonData
 if not MPT or not MPT.Database then return end
@@ -7,32 +7,9 @@ if not MPT or not MPT.Database then return end
 local LFGRating = {}
 MPT.LFGRatingIndicator = LFGRating
 
--- Display count: total good ratings across all runs for this player
-local function GetDisplayGoodCount(playerName)
-    if not MPT.Database or not playerName then return 0 end
-    return MPT.Database.GetPlayerGoodCount and MPT.Database:GetPlayerGoodCount(playerName) or 0
-end
-
--- Display bad count: total bad ratings across all runs for this player
-local function GetDisplayBadCount(playerName)
-    if not MPT.Database or not playerName then return 0 end
-    return MPT.Database.GetPlayerBadCount and MPT.Database:GetPlayerBadCount(playerName) or 0
-end
-
 local function FormatRatingLine(playerName)
-    local goodCount = GetDisplayGoodCount(playerName)
-    local badCount = GetDisplayBadCount(playerName)
-    local ratingText
-    if goodCount > 0 and badCount > 0 then
-        ratingText = "|cff00ff00+" .. goodCount .. " Good|r / |cffff4444+" .. badCount .. " Bad|r"
-    elseif goodCount > 0 then
-        ratingText = "|cff00ff00+" .. goodCount .. " Good|r"
-    elseif badCount > 0 then
-        ratingText = "|cffff4444+" .. badCount .. " Bad|r"
-    else
-        ratingText = "|cffffffffNo rating yet|r"
-    end
-    return ratingText
+    if not playerName then return MPT.Utils:FormatStarSummary(nil, 0) end
+    return MPT.Utils:FormatStarSummary(MPT.Database:GetPlayerRatingSummary(playerName))
 end
 
 -- Dedup: track the last resultID we added lines for on this tooltip.

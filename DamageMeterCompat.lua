@@ -205,6 +205,12 @@ local function SafeNonEmpty(s)
     return ok and result
 end
 
+-- Secret values can't be used as table keys or compared, so callers check first.
+local function IsSecret(v)
+    return issecretvalue ~= nil and issecretvalue(v) == true
+end
+DamageMeterCompat.IsSecret = IsSecret
+
 function DamageMeterCompat:EnsureSessionID()
     if not self.IsWoW12Plus then
         return false
@@ -434,8 +440,10 @@ function DamageMeterCompat:GetInterruptData()
                 if existing then
                     existing.interrupts = (existing.interrupts or 0) + (source.totalAmount or 0)
                     if source.sourceGUID then
-                        if not existing.allGUIDs then existing.allGUIDs = {} end
-                        existing.allGUIDs[tostring(source.sourceGUID)] = true
+                        if not IsSecret(source.sourceGUID) then
+                            if not existing.allGUIDs then existing.allGUIDs = {} end
+                            SafeMapSet(existing.allGUIDs, tostring(source.sourceGUID), true)
+                        end
                         existing.sourceGUID = source.sourceGUID
                         existing.guid = source.sourceGUID
                     end
@@ -446,8 +454,9 @@ function DamageMeterCompat:GetInterruptData()
                         guid = source.sourceGUID,
                         sourceGUID = source.sourceGUID,
                     }
-                    if source.sourceGUID then
-                        newEntry.allGUIDs = { [tostring(source.sourceGUID)] = true }
+                    if source.sourceGUID and not IsSecret(source.sourceGUID) then
+                        newEntry.allGUIDs = {}
+                        SafeMapSet(newEntry.allGUIDs, tostring(source.sourceGUID), true)
                     end
                     SafeMapSet(interruptData, plainName, newEntry)
                 end
