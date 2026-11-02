@@ -140,6 +140,11 @@ local function ExtractDeathCountWithFallback(source)
     return 0
 end
 
+-- Secret values can't be used as table keys or compared, so callers check first.
+local function IsSecret(v)
+    return issecretvalue ~= nil and issecretvalue(v) == true
+end
+
 local function AggregateDeathsBySource(session, targetSourceGUID)
     if type(session) ~= "table" or type(session.combatSources) ~= "table" then
         return nil
@@ -150,7 +155,10 @@ local function AggregateDeathsBySource(session, targetSourceGUID)
     for _, source in ipairs(session.combatSources) do
         if type(source) == "table" then
             local sourceGUID = source.sourceGUID or source.guid
-            if (not targetSourceGUID) or (sourceGUID == targetSourceGUID) then
+            -- A player who left before the run ended comes back with a secret GUID,
+            -- which throws on ==. It can't be matched, so skip it.
+            local comparable = not IsSecret(sourceGUID)
+            if (not targetSourceGUID) or (comparable and sourceGUID == targetSourceGUID) then
                 found = true
                 total = total + (ExtractDeathCountWithFallback(source) or 0)
             end
@@ -205,10 +213,6 @@ local function SafeNonEmpty(s)
     return ok and result
 end
 
--- Secret values can't be used as table keys or compared, so callers check first.
-local function IsSecret(v)
-    return issecretvalue ~= nil and issecretvalue(v) == true
-end
 DamageMeterCompat.IsSecret = IsSecret
 
 function DamageMeterCompat:EnsureSessionID()
@@ -642,7 +646,7 @@ function DamageMeterCompat:GetDeathCountForSourceGUID(sourceGUID, sessionID)
     if not self.IsWoW12Plus then
         return nil
     end
-    if type(sourceGUID) ~= "string" or sourceGUID == "" then
+    if type(sourceGUID) ~= "string" or IsSecret(sourceGUID) or sourceGUID == "" then
         return nil
     end
     if not Enum or not Enum.DamageMeterType or not Enum.DamageMeterType.Deaths then
