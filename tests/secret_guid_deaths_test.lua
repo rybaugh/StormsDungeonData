@@ -1,6 +1,6 @@
 -- Offline test: a player who leaves before the run ends comes back from C_DamageMeter
--- with a secret GUID. GetDeathCountForSourceGUID must skip that row instead of
--- comparing it (secret == string throws in the real client).
+-- with a secret GUID. GetDeathCountForSourceGUID must check every row with
+-- issecretvalue and skip the secret ones (secret == string throws in the real client).
 -- Run from the addon folder with Lua 5.1:
 --   lua tests/secret_guid_deaths_test.lua
 
@@ -18,12 +18,18 @@ C_RestrictedActions = {GetAddOnRestrictionState = function() return 0 end}
 -- a secret row must never match, even when its text equals the target.
 local rows = {}
 local secrets = {}
-issecretvalue = function(v) return v ~= nil and secrets[v] == true end
+local checked = {}
+issecretvalue = function(v)
+    if v ~= nil then checked[v] = true end
+    return v ~= nil and secrets[v] == true
+end
+local sessionCalls = 0
 
 C_DamageMeter = {
     GetAvailableCombatSessions = function() return {} end,
-    GetCombatSessionSourceFromType = function() return nil end,
+    GetCombatSessionSourceFromType = function() sessionCalls = sessionCalls + 1 return nil end,
     GetCombatSessionFromType = function(sessionType, meterType)
+        sessionCalls = sessionCalls + 1
         assert(meterType == Enum.DamageMeterType.Deaths)
         local sources = {}
         for _, r in ipairs(rows) do
@@ -53,6 +59,7 @@ secrets["Player-0002"] = true
 local ok, deaths = pcall(Compat.GetDeathCountForSourceGUID, Compat, "Player-0001")
 check("no error with a secret row in the session", ok)
 check("stayed player's deaths still counted", ok and deaths == 1)
+check("secret row checked with issecretvalue", checked["Player-0002"] == true)
 
 local okLeft, leftDeaths = pcall(Compat.GetDeathCountForSourceGUID, Compat, "Player-0002")
 check("left player lookup does not error", okLeft)
@@ -61,8 +68,10 @@ check("left player returns nil (no readable row)", okLeft and leftDeaths == nil)
 -- A secret GUID passed in as the target is refused up front.
 local secretTarget = "Player-0003"
 secrets[secretTarget] = true
+sessionCalls = 0
 local okTarget, targetDeaths = pcall(Compat.GetDeathCountForSourceGUID, Compat, secretTarget)
 check("secret target refused", okTarget and targetDeaths == nil)
+check("secret target never queried", sessionCalls == 0)
 
 if failures > 0 then
     print(failures .. " failure(s)")
