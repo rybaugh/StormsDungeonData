@@ -2040,9 +2040,25 @@ function Events:Initialize()
     L("INFO", "Events initialized; registered CHALLENGE_MODE_COMPLETED, CHALLENGE_MODE_COMPLETED_REWARDS, CHALLENGE_MODE_START, SCENARIO_*, PLAYER_ENTERING_WORLD, etc.")
 end
 
+-- Extra reading of party feign/death state at combat edges, on top of FeignDeath's own
+-- unit events. pcall so a tracker error can't block the deferred FinalizeRun.
+local function ScanPartyForFeigns()
+    if not (MPT.InMythicPlus and MPT.FeignDeath and MPT.FeignDeath.ScanParty) then
+        return
+    end
+    local ok, err = pcall(MPT.FeignDeath.ScanParty, MPT.FeignDeath)
+    if not ok then
+        L("ERROR", "FeignDeath:ScanParty failed: " .. tostring(err))
+    end
+end
+
 function Events:OnEvent(event, ...)
     local args = {...}
     if event == "CHALLENGE_MODE_START" then
+        -- Feigns seen in an earlier key must not carry into this one
+        if MPT.FeignDeath then
+            MPT.FeignDeath:Reset()
+        end
         local trace = EnsureFlowTrace()
         trace.events = {}
         trace.runStartedAt = time()
@@ -2335,7 +2351,9 @@ function Events:OnEvent(event, ...)
                     L("ERROR", "LiveTracker:OnEnterCombat failed: " .. tostring(err))
                 end
             end
+            ScanPartyForFeigns()
         elseif event == "PLAYER_REGEN_ENABLED" then
+            ScanPartyForFeigns()
             -- Exit combat: record point-in-time snapshot for live dungeon tracker
             -- pcall so a live-tracker error can't block the deferred FinalizeRun below.
             if MPT.LiveTracker and MPT.LiveTracker.OnExitCombat then
@@ -3737,6 +3755,17 @@ function Events:FinalizeRun(reason)
         
         else
             L("INFO","|cff00ffaa[StormsDungeonData]|r Combat data source: " .. combatDataSource)
+        end
+
+        -- Hunters' Feign Deaths show up as deaths in the meter on everyone else's client.
+        -- Take them off before deaths feed the points and the saved record.
+        if MPT.FeignDeath and MPT.FeignDeath.ApplyToPlayers then
+            local ok, result = pcall(MPT.FeignDeath.ApplyToPlayers, MPT.FeignDeath, MPT.CurrentRunData.players)
+            if not ok then
+                L("ERROR", "FeignDeath:ApplyToPlayers failed: " .. tostring(result))
+            elseif result and result > 0 then
+                L("INFO", "Removed " .. result .. " Feign Death(s) from the per-player death counts")
+            end
         end
 
         -- Points: 0-100 share of contribution, minus death penalty
