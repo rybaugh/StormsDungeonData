@@ -276,7 +276,13 @@ be used either.
 
 `FeignDeath.Adjust(entries, groupDeaths)` is the pure part. Not yet confirmed in game: whether
 `UNIT_FLAGS` and `UnitIsFeignDeath` are usable on party units inside a key in 12.1.5. The key-count
-comparison works without them. Runs saved before this fix keep their old counts.
+comparison works without them.
+
+Runs saved before the fix: `Database:ApplyOneTimeFeignDeathFix` (flag `feignDeathFixV1`) calls
+`FeignDeath.FixSavedRun(run)` on every non-deleted run once. It trims hunters who aren't the recording
+player against `run.deathCount` and keeps each changed player's old number in `p.deathsBeforeFeignFix`.
+Runs with no `deathCount`, or where the recording player (`run.character`) isn't in `run.players`, are
+left alone.
 
 ## UI Components
 
@@ -299,6 +305,7 @@ All migrations are one-time, gated by flags in `StormsDungeonDataDB.settings`:
 | `ApplyOneTimeLegacySeasonAssignment` | `legacySeasonAssignedOnce` | Assigns current seasonID to runs with no season metadata |
 | `ApplyOneTimeTWWSeasonIDRemigration` | `twwSeasonAbsoluteIDMigrationV1` | Converts relative TWW season IDs (1-4) to absolute (13-16) |
 | `ApplyOneTimeLegacyTimedResultBackfillV2` | `legacyTimedResultBackfilledV2` | Re-evaluates `onTime` for all runs using duration vs API time limit (fixes Midnight mis-tags where `keystoneUpgrades` is always 0) |
+| `ApplyOneTimeFeignDeathFix` | `feignDeathFixV1` | Takes Feign Deaths off other players' hunters on saved runs, using `run.deathCount`; old value kept in `deathsBeforeFeignFix` |
 | `RefreshAllRunTimedStatus` | (runs every login) | Live refresh of `onTime` in case Blizzard changes dungeon timers mid-season |
 
 ---

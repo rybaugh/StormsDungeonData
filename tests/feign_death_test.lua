@@ -301,6 +301,124 @@ fire("UNIT_FLAGS", "party1")
 FD:Reset()
 check("reset clears tracked feigns", (FD:GetCounts("Player-0002", "Hunty")) == 0)
 
+-- ---------------------------------------------------------------------------
+-- FixSavedRun: runs saved before the fix
+-- ---------------------------------------------------------------------------
+local function savedRun(deathCount, players)
+    return {character = "Me", deathCount = deathCount, players = players}
+end
+
+local run = savedRun(4, {
+    {name = "Me-Realm", class = "MAGE", deaths = 1},
+    {name = "Hunty-Other", class = "HUNTER", deaths = 21},
+    {name = "Tanky-Realm", class = "WARRIOR", deaths = 3},
+})
+check("saved run: feigns removed", FD.FixSavedRun(run) == 21 and run.players[2].deaths == 0)
+check("saved run: original count kept on the record", run.players[2].deathsBeforeFeignFix == 21)
+check("saved run: other players untouched",
+    run.players[1].deaths == 1 and run.players[3].deaths == 3 and run.players[3].deathsBeforeFeignFix == nil)
+check("saved run: fixing twice changes nothing", FD.FixSavedRun(run) == 0 and run.players[2].deathsBeforeFeignFix == 21)
+
+run = savedRun(0, {{name = "Me-Realm", class = "HUNTER", deaths = 2}, {name = "Pal-Realm", class = "PALADIN", deaths = 0}})
+check("saved run: the recording hunter is left alone", FD.FixSavedRun(run) == 0 and run.players[1].deaths == 2)
+
+run = savedRun(0, {{unitID = "player", name = "Renamed-Realm", class = "HUNTER", deaths = 2}})
+check("saved run: unitID marks the recording player", FD.FixSavedRun(run) == 0 and run.players[1].deaths == 2)
+
+run = savedRun(nil, {{name = "Me-Realm", class = "MAGE", deaths = 0}, {name = "Hunty-Other", class = "HUNTER", deaths = 5}})
+check("saved run: no key count, no change", FD.FixSavedRun(run) == 0 and run.players[2].deaths == 5)
+
+run = {character = "Gone", deathCount = 0, players = {{name = "Hunty-Other", class = "HUNTER", deaths = 5}}}
+check("saved run: skipped when the recording player isn't on it", FD.FixSavedRun(run) == 0 and run.players[1].deaths == 5)
+
+run = savedRun(1, {{name = "Me-Realm", class = "MAGE", deaths = 3}, {name = "Hunty-Other", class = "HUNTER", deaths = 2}})
+check("saved run: bad key count leaves the hunter", FD.FixSavedRun(run) == 0 and run.players[2].deaths == 2)
+
+check("saved run: junk input is ignored", FD.FixSavedRun(nil) == 0 and FD.FixSavedRun({players = "x"}) == 0)
+
+-- Only hunters' counts are written, even when another row holds a bad value.
+run = savedRun(0, {
+    {name = "Me-Realm", class = "MAGE", deaths = 0},
+    {name = "Tanky-Realm", class = "WARRIOR", deaths = -2},
+    {name = "Heals-Realm", class = "PRIEST", deaths = "0"},
+    {name = "Hunty-Other", class = "HUNTER", deaths = 3},
+})
+check("saved run: hunter trimmed beside odd rows", FD.FixSavedRun(run) == 3 and run.players[4].deaths == 0)
+check("saved run: odd rows left exactly as saved",
+    run.players[2].deaths == -2 and run.players[2].deathsBeforeFeignFix == nil
+    and run.players[3].deaths == "0" and run.players[3].deathsBeforeFeignFix == nil)
+
+run = savedRun(0, {{name = "Me-Realm", class = "MAGE", deaths = 0}, {name = "Hunty-Other", class = "HUNTER", deaths = 1e9}})
+check("saved run: absurd count is skipped", FD.FixSavedRun(run) == 0 and run.players[2].deaths == 1e9)
+
+run = savedRun(2, {
+    {name = "Me-Realm", class = "MAGE", deaths = 1},
+    {name = "Hunty-Other", class = "HUNTER", deaths = 5},
+    {name = "Bowy-Other", class = "HUNTER", deaths = 3},
+})
+check("saved run: two hunters trimmed down to the key count",
+    FD.FixSavedRun(run) == 7 and run.players[2].deaths + run.players[3].deaths == 1 and run.players[1].deaths == 1)
+
+-- The one-time pass in Database.lua.
+GetRealmName = function() return "Realm" end
+time = os.time
+local realPrint = print
+local printed = {}
+print = function(...) printed[#printed + 1] = table.concat({...}, " ") end
+dofile(ADDON .. "/Database.lua")
+local DB = StormsDungeonData.Database
+StormsDungeonDataDB = {
+    settings = {},
+    runs = {
+        savedRun(1, {{name = "Me-Realm", class = "MAGE", deaths = 1}, {name = "Hunty-Other", class = "HUNTER", deaths = 6}}),
+        savedRun(2, {{name = "Me-Realm", class = "MAGE", deaths = 2}, {name = "Tanky-Realm", class = "WARRIOR", deaths = 0}}),
+        {character = "Me", deathCount = 0, deleted = true,
+            players = {{name = "Me-Realm", class = "MAGE", deaths = 0}, {name = "Hunty-Other", class = "HUNTER", deaths = 4}}},
+    },
+}
+DB:ApplyOneTimeFeignDeathFix()
+print = realPrint
+check("migration fixes the hunter run", StormsDungeonDataDB.runs[1].players[2].deaths == 0)
+check("migration skips deleted runs", StormsDungeonDataDB.runs[3].players[2].deaths == 4)
+check("migration sets its flag", StormsDungeonDataDB.settings.feignDeathFixV1 == true)
+check("migration tells the player once", #printed == 1 and printed[1]:find("1 run") ~= nil)
+
+StormsDungeonDataDB.runs[1].players[2].deaths = 9
+StormsDungeonDataDB.runs[1].players[2].deathsBeforeFeignFix = nil
+DB:ApplyOneTimeFeignDeathFix()
+check("migration runs only once", StormsDungeonDataDB.runs[1].players[2].deaths == 9)
+
+-- One record that makes the fix throw is skipped; the rest are still corrected.
+StormsDungeonDataDB = {
+    settings = {},
+    runs = {
+        savedRun(0, {{name = "Me-Realm", class = "MAGE", deaths = 0}, {name = "Boom-Other", class = "HUNTER", deaths = 2}}),
+        savedRun(0, {{name = "Me-Realm", class = "MAGE", deaths = 0}, {name = "Hunty-Other", class = "HUNTER", deaths = 2}}),
+    },
+}
+local realFix = FD.FixSavedRun
+FD.FixSavedRun = function(r)
+    if r.players[2].name == "Boom-Other" then error("boom") end
+    return realFix(r)
+end
+print = function() end
+local okThrow = pcall(DB.ApplyOneTimeFeignDeathFix, DB)
+print = realPrint
+FD.FixSavedRun = realFix
+check("migration survives a record that throws",
+    okThrow and StormsDungeonDataDB.runs[2].players[2].deaths == 0 and StormsDungeonDataDB.settings.feignDeathFixV1 == true)
+
+StormsDungeonDataDB = {settings = {}, runs = "junk"}
+check("migration tolerates a damaged runs table", pcall(DB.ApplyOneTimeFeignDeathFix, DB))
+
+-- Without the filter loaded the pass waits instead of marking itself done.
+StormsDungeonDataDB = {settings = {}, runs = {}}
+local savedFD = StormsDungeonData.FeignDeath
+StormsDungeonData.FeignDeath = nil
+DB:ApplyOneTimeFeignDeathFix()
+StormsDungeonData.FeignDeath = savedFD
+check("migration waits for the filter", StormsDungeonDataDB.settings.feignDeathFixV1 == nil)
+
 if failures > 0 then
     print(failures .. " failure(s)")
     os.exit(1)

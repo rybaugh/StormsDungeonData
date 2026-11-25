@@ -10,6 +10,7 @@ local LEGACY_TIMED_RESULT_MIGRATION_V2_FLAG = "legacyTimedResultBackfilledV2"
 local LEGACY_TWW_SEASON_REMIGRATION_FLAG = "twwSeasonAbsoluteIDMigrationV1"
 local LEGACY_INTERRUPT_DOUBLE_COUNT_FIX_FLAG = "interruptDoubleCountFixV1"
 local STAR_RATING_MIGRATION_FLAG = "starRatingMigrationV1"
+local FEIGN_DEATH_FIX_FLAG = "feignDeathFixV1"
 
 local function GetCurrentSeasonMigrationData()
     local seasonID = nil
@@ -425,6 +426,7 @@ function MPT.Database:Initialize()
     self:ApplyOneTimeLegacyTimedResultBackfillV2()  -- correct Midnight-era mis-tags
     self:ApplyOneTimeInterruptDoubleCountFix()      -- halve doubled interrupts (FinalizeNewAPIData ran twice)
     self:ApplyOneTimeStarRatingMigration()          -- good/bad run ratings become 5/1 stars
+    self:ApplyOneTimeFeignDeathFix()                -- take Feign Deaths off other players' hunters
 end
 
 -- Player ratings are 1-5 stars, one per player per run (run.playerRatings[key]).
@@ -532,6 +534,40 @@ function MPT.Database:ApplyOneTimeStarRatingMigration()
     StormsDungeonDataDB.settings[STAR_RATING_MIGRATION_FLAG] = true
     if MPT.Log then
         MPT.Log:Info("ApplyOneTimeStarRatingMigration: converted=" .. tostring(converted))
+    end
+end
+
+-- Runs saved before FeignDeath.lua existed counted a hunter's Feign Deaths as deaths
+-- whenever someone else recorded the run. Trims every saved run against its key death
+-- count, once. Each changed player keeps the old number in deathsBeforeFeignFix.
+function MPT.Database:ApplyOneTimeFeignDeathFix()
+    if not StormsDungeonDataDB then return end
+    -- FeignDeath.lua loads after this file; without it, leave the flag unset and try next login.
+    if not (MPT.FeignDeath and MPT.FeignDeath.FixSavedRun) then return end
+    StormsDungeonDataDB.settings = StormsDungeonDataDB.settings or {}
+    if StormsDungeonDataDB.settings[FEIGN_DEATH_FIX_FLAG] then return end
+
+    local runs = type(StormsDungeonDataDB.runs) == "table" and StormsDungeonDataDB.runs or {}
+    local fixedRuns, removedDeaths = 0, 0
+    for _, run in ipairs(runs) do
+        if type(run) == "table" and not run.deleted then
+            -- pcall: this runs inside Initialize, and one odd record must not stop the addon loading.
+            local ok, removed = pcall(MPT.FeignDeath.FixSavedRun, run)
+            if not ok then
+                if MPT.Log and MPT.Log.Log then
+                    MPT.Log:Log("ERROR", "ApplyOneTimeFeignDeathFix: run skipped: " .. tostring(removed))
+                end
+            elseif removed > 0 then
+                fixedRuns = fixedRuns + 1
+                removedDeaths = removedDeaths + removed
+            end
+        end
+    end
+
+    StormsDungeonDataDB.settings[FEIGN_DEATH_FIX_FLAG] = true
+    if fixedRuns > 0 then
+        print("|cff00ffaa[StormsDungeonData]|r Removed " .. tostring(removedDeaths)
+            .. " Feign Death(s) counted as hunter deaths on " .. tostring(fixedRuns) .. " run(s).")
     end
 end
 
