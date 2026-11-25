@@ -26,6 +26,8 @@ CombatLog.lua       → MPT.CombatLog (COMBAT_LOG_EVENT_UNFILTERED parser)
 CombatLogFileMonitor.lua → MPT.CombatLogFileMonitor (file-based auto-detection)
 ReporterElection.lua → MPT.ReporterElection (addon-message party election, prefix "SDD")
 LiveTracker.lua     → MPT.LiveTracker (timeline snapshots: dataPoints, bossKills, combatSessions)
+FeignDeath.lua      → MPT.FeignDeath (keeps hunters' Feign Deaths out of per-player death counts;
+                      tested offline by tests/feign_death_test.lua)
 TestMode.lua        → test helpers
 UI/MinimapButton.xml / UI/MinimapButton.lua → draggable minimap button
 UI/ScoreboardFrame.lua → MPT.Scoreboard (post-run MVP ranking, GetMVPRanking)
@@ -250,6 +252,31 @@ is elected to post the run summary to party chat.
 - Displayed in: unit tooltips (`PlayerTooltip`), LFG search results and applicant tooltips (`LFGRatingIndicator`)
 
 ---
+
+## Feign Death and death counts
+
+Per-player deaths come from the Blizzard Deaths meter (`C_DamageMeter`, `Enum.DamageMeterType.Deaths`).
+That meter logs a hunter's Feign Death as a death on every client except the hunter's own, and the row
+has no field that tells a feign from a real death. The combat log is gone in 12.x, so `UNIT_DIED` can't
+be used either.
+
+`FeignDeath.lua` handles it in two parts:
+
+- During a key it watches party1-4 through `UNIT_FLAGS` (`UnitIsFeignDeath`, `UnitIsDeadOrGhost`,
+  `UnitIsGhost`) and `UNIT_SPELLCAST_SUCCEEDED` (spell 5384 when the id isn't secret), registered with
+  `RegisterUnitEvent`, plus a scan at each combat start and end. It counts feigns and real deaths per
+  player, keyed by GUID, or by name when the GUID is secret. A cast and a flag change within 3 seconds
+  are one feign. Reset on CHALLENGE_MODE_START.
+- In `FinalizeRun`, `FeignDeath:ApplyToPlayers(players)` runs after the meter deaths are assigned and
+  before points. Inside the dungeon it compares the sum of player deaths with
+  `C_ChallengeMode.GetDeathCount()` (the timer-penalty count, which a feign doesn't add to) and takes
+  the excess off other players' hunters, tracked feigns first. If the key count is lower than the deaths
+  of players who can't feign, or the player is outside the dungeon (the API can read 0 there), only
+  tracked feigns come off, never below the real deaths that were seen. The local player is never changed.
+
+`FeignDeath.Adjust(entries, groupDeaths)` is the pure part. Not yet confirmed in game: whether
+`UNIT_FLAGS` and `UnitIsFeignDeath` are usable on party units inside a key in 12.1.5. The key-count
+comparison works without them. Runs saved before this fix keep their old counts.
 
 ## UI Components
 

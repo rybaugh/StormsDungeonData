@@ -18,6 +18,7 @@ CombatLog.lua
 CombatLogFileMonitor.lua
 ReporterElection.lua
 LiveTracker.lua
+FeignDeath.lua
 TestMode.lua
 InsightsAdvisor.lua
 UI/MinimapButton.xml
