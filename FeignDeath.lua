@@ -21,6 +21,7 @@ FeignDeath.DEDUPE_SECONDS = 3
 
 local HUNTER_CLASS = "HUNTER"
 local CHALLENGE_DIFFICULTY_ID = 8
+local MAX_SANE_DEATHS = 500
 local PARTY_UNIT_LIST = {"party1", "party2", "party3", "party4"}
 local PARTY_UNITS = {}
 for _, unit in ipairs(PARTY_UNIT_LIST) do
@@ -334,6 +335,53 @@ function FeignDeath:ApplyToPlayers(players)
             L("INFO", "FeignDeath: " .. tostring(p.name) .. " deaths " .. before .. " -> " .. adjusted[i]
                 .. " (feigns seen=" .. entries[i].feigns .. ", key deaths=" .. tostring(groupDeaths) .. ")")
             p.deaths = adjusted[i]
+        end
+    end
+    return removed
+end
+
+-- Corrects one run saved before this filter existed, in place. There are no tracked
+-- feigns for an old run, so the saved key count (run.deathCount) is the only
+-- reference: deaths beyond it come off the other players' hunters. The count each
+-- changed player had before is kept in p.deathsBeforeFeignFix. Returns how many
+-- deaths were removed. Skips runs with no key count, runs already corrected, and
+-- runs where the recording player can't be found (their own count must not change).
+function FeignDeath.FixSavedRun(run)
+    if type(run) ~= "table" or type(run.players) ~= "table" then
+        return 0
+    end
+    local groupDeaths = tonumber(run.deathCount)
+    if not groupDeaths or groupDeaths < 0 then
+        return 0
+    end
+
+    local recorder = NameKey(run.character)
+    local entries, foundRecorder = {}, false
+    for i, p in ipairs(run.players) do
+        if type(p) ~= "table" or p.deathsBeforeFeignFix ~= nil then
+            return 0
+        end
+        -- A count this high is a damaged record, not something to trim one death at a time.
+        if (tonumber(p.deaths) or 0) > MAX_SANE_DEATHS then
+            return 0
+        end
+        local isLocal = p.unitID == "player" or (recorder ~= nil and NameKey(p.name) == recorder)
+        foundRecorder = foundRecorder or isLocal
+        entries[i] = {deaths = p.deaths, isHunter = p.class == HUNTER_CLASS, isLocal = isLocal}
+    end
+    if not foundRecorder then
+        return 0
+    end
+
+    local adjusted, removed = FeignDeath.Adjust(entries, groupDeaths)
+    if removed > 0 then
+        for i, p in ipairs(run.players) do
+            local before = tonumber(p.deaths) or 0
+            -- Trimming only ever lowers a count; anything else is left exactly as saved.
+            if adjusted[i] < before then
+                p.deathsBeforeFeignFix = before
+                p.deaths = adjusted[i]
+            end
         end
     end
     return removed
